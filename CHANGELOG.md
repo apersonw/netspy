@@ -3,6 +3,17 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- `RedisUserPool` 新增 `require_cookies` 参数（默认 `False`，不影响现有行为）。
+  给 `login=None`、Cookie 完全靠外部服务写进 `<name>:cookie:<username>` 的用法
+  补一个缺口：外部还没写进来，或者写的 TTL 已经到期时，不再发一个没有 Cookie
+  的 `User` 出去（调用方拿着它去请求十有八九认证失败，白打一次）——改成当作
+  「暂不可用」放回冷却队列，`not_ready_retry_seconds`（默认 30 秒）控制多久后
+  再让别的调用者试一次。
+
 ## [1.0.1] - 2026-09-15
 
 文档修正，无代码变更。README 里刷新了一下措辞。

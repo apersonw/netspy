@@ -120,6 +120,41 @@ def test_redis_pool_caches_cookies(rds: Any) -> None:
     assert rds.get("p3:cookie:a") is not None
 
 
+def test_redis_pool_require_cookies_treats_missing_cookie_as_not_ready(rds: Any) -> None:
+    # 没有 login 回调（Cookie 完全指望外部写进来），Redis 里也还没有缓存——
+    # require_cookies=True 时不该发一个没有 Cookie 的 User 出去。
+    pool = RedisUserPool(
+        "p4",
+        [{"username": "a"}],
+        redis_client=rds,
+        require_cookies=True,
+        not_ready_retry_seconds=999,
+    )
+    assert pool.get() is None
+    # 账号被放回冷却队列了，而不是丢失——手动提前解封后应该还借得到。
+    rds.zadd("p4:users:ready", {"a": time.time() - 1})
+    # 这次 Redis 里依然没有 Cookie，所以还是拿不到。
+    assert pool.get() is None
+
+
+def test_redis_pool_require_cookies_returns_user_once_published(rds: Any) -> None:
+    # 模拟外部保活服务把 Cookie 写进了约定好的 key——RedisUserPool 只负责读。
+    rds.set("p5:cookie:a", '{"web_session": "abc"}')
+    pool = RedisUserPool("p5", [{"username": "a"}], redis_client=rds, require_cookies=True)
+    user = pool.get()
+    assert user is not None
+    assert user.cookies == {"web_session": "abc"}
+
+
+def test_redis_pool_without_require_cookies_keeps_old_behavior(rds: Any) -> None:
+    # require_cookies 默认 False：没有 login、没有缓存 Cookie 时仍然发出账号——
+    # 这是改动前就有的行为，不能因为新参数破坏掉。
+    pool = RedisUserPool("p6", [{"username": "a"}], redis_client=rds)
+    user = pool.get()
+    assert user is not None
+    assert user.cookies == {}
+
+
 def test_redis_pool_shared_across_instances(rds: Any) -> None:
     a = RedisUserPool("shared", [{"username": "u1"}], redis_client=rds)
     b = RedisUserPool("shared", [{"username": "u1"}], redis_client=rds)

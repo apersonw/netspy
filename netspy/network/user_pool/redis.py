@@ -3,6 +3,12 @@
 账号在 Redis sorted set ``<name>:users:ready`` 里，score = 可用时间戳（0 或过去 = 现在可用）。
 ``get`` 用 ``zpopmin`` 借走（其他节点看不到了），``report_ok`` / ``report_bad`` 归还
 （后者带冷却时间）。cookies 缓存在 ``<name>:cookie:<username>``（带 TTL）。
+
+``login=None`` 时，Cookie 完全由外部写入 ``<name>:cookie:<username>``——比如另一个
+专门负责登录 / 保活的服务。这种「纯消费」场景下如果外部还没写进来（或者写的 TTL
+已经到期），``require_cookies=True`` 会让这个账号被当成「暂不可用」放回冷却队列，
+而不是发一个没有 Cookie 的 ``User`` 出去（那样调用方十有八九会拿着它去请求，
+认证失败白打一次）。
 """
 
 from __future__ import annotations
@@ -30,12 +36,16 @@ class RedisUserPool(UserPool):
         login: LoginFn | None = None,
         redis_client: Any = None,
         cookie_ttl: int = 3600,
+        require_cookies: bool = False,
+        not_ready_retry_seconds: float = 30.0,
     ) -> None:
         self._r: Any = redis_client if redis_client is not None else _default_redis()
         self._ready = f"{name}:users:ready"
         self._cookie_prefix = f"{name}:cookie:"
         self._login = login
         self._cookie_ttl = cookie_ttl
+        self._require_cookies = require_cookies
+        self._not_ready_retry_seconds = not_ready_retry_seconds
         self._accounts = {u.username: u for u in (_coerce_user(a) for a in (accounts or []))}
         if self._accounts:
             self._r.zadd(self._ready, dict.fromkeys(self._accounts, 0.0), nx=True)
@@ -66,6 +76,12 @@ class RedisUserPool(UserPool):
                 tools.dumps_json(user.cookies),
                 ex=self._cookie_ttl,
             )
+        elif self._require_cookies:
+            # 没有登录回调、Redis 里也没有缓存的 Cookie——外部保活服务大概率
+            # 还没写进来，或者写的 TTL 到期了。当成暂不可用放回冷却队列，
+            # 不发一个没有 Cookie 的 User 出去。
+            self._r.zadd(self._ready, {username: now + self._not_ready_retry_seconds})
+            return None
         return user
 
     def report_ok(self, user: User) -> None:
