@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 #: 未绑定 name 的全局 logger，等价于 loguru 的 logger
 log = logger
 
+_lock = threading.Lock()
 _state: dict[str, bool] = {"configured": False}
 
 _FORMAT = (
@@ -30,6 +32,11 @@ _FORMAT = (
 
 def configure() -> None:
     """按 `netspy.setting` 的当前值重建日志 sink。"""
+    with _lock:
+        _configure_locked()
+
+
+def _configure_locked() -> None:
     logger.remove()
     logger.configure(extra={"name": setting.PROJECT_NAME})
     logger.add(
@@ -54,7 +61,14 @@ def configure() -> None:
 def get_logger(name: str | None = None) -> Logger:
     """返回 logger；`name` 会作为 `{extra[name]}` 显示在日志中。"""
     if not _state["configured"]:
-        configure()
+        # 双重检查加锁：get_logger 在几乎每个模块顶层都会被调到，第一次调用
+        # 完全可能撞上多线程（比如同进程里跑了不止一个 Spider）。configure()
+        # 不是幂等安全的——它先 logger.remove() 清空全部 sink 再重新 add，
+        # 两个线程同时"看到还没配置"各自跑一遍的话，remove/add 交错执行，
+        # 实测会留下重复的 sink，日志每行打印两遍。
+        with _lock:
+            if not _state["configured"]:
+                _configure_locked()
     return logger.bind(name=name) if name else logger
 
 

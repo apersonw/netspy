@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,72 @@ from netspy.utils import log
 def test_get_logger_is_usable() -> None:
     lg = log.get_logger("test")
     lg.info("hello")  # 不应抛异常
+
+
+def test_get_logger_first_call_is_not_racy_across_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归测试：多个线程同时第一次调 `get_logger()`，只能真正 configure 一次。
+
+    这是实测复现出来的真 bug——懒初始化检查（`if not _state["configured"]`）
+    原来没加锁，而 `configure()` 本身不是幂等安全的：它先 `logger.remove()`
+    清空全部 sink，再重新 `add()`。两个线程同时看到「还没配置」各自跑一遍的话，
+    remove/add 会交错执行，实测会留下重复的 stderr sink——每行日志被打印两遍。
+
+    `get_logger()` 几乎在每个模块顶层都会被调到，第一次调用完全可能撞上
+    多线程（比如同一进程里跑了不止一个 Spider）。用 monkeypatch 在
+    `logger.add` 里插一个暂停点，强制两个线程的第一次调用真正并发。
+    """
+    monkeypatch.setattr(log, "_state", {"configured": False})
+    from loguru import logger
+
+    logger.remove()
+
+    paused = threading.Event()
+    proceed = threading.Event()
+    orig_add = logger.add
+    call_count = {"n": 0}
+
+    def patched_add(*args: object, **kwargs: object) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            paused.set()
+            proceed.wait(timeout=2)
+        return orig_add(*args, **kwargs)
+
+    monkeypatch.setattr(logger, "add", patched_add)
+
+    t1 = threading.Thread(target=lambda: log.get_logger("t1"))
+    t1.start()
+    assert paused.wait(timeout=2), "没能让第一次 configure() 卡在 add() 里，测试前提不成立"
+
+    t2_done = threading.Event()
+
+    def call_second() -> None:
+        log.get_logger("t2")
+        t2_done.set()
+
+    t2 = threading.Thread(target=call_second)
+    t2.start()
+    # t1 还攥着锁在 configure 中途暂停——t2 这时候必须被真正挡住，
+    # 不能因为看到 _state["configured"] 还是 False 就自己也跑一遍 configure()
+    assert not t2_done.wait(timeout=0.3), (
+        "第二个线程在第一个线程还没配置完时就完成了 get_logger()——"
+        "两次 configure() 之间没有互斥，sink 随时可能重复"
+    )
+
+    proceed.set()
+    t1.join(timeout=2)
+    assert t2_done.wait(timeout=2), "第一个线程释放锁后，第二个线程应该能顺利完成"
+
+    # 不按 repr 里有没有 "stderr" 过滤——pytest 默认会接管 sys.stderr 做输出捕获，
+    # add() 加进去的 sink 绑的是捕获对象，repr 里不一定还看得到 "stderr" 字样。
+    # 这里从「remove() 之后是空的」这个已知基线数，加了几个 sink 就是几个
+    sinks = list(logger._core.handlers.values())
+    assert len(sinks) == 1, (
+        f"应该只有一个 sink，实际 {len(sinks)} 个——"
+        "并发的第一次 configure() 没被锁住，留下了重复的 sink"
+    )
 
 
 def test_configure_writes_to_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
