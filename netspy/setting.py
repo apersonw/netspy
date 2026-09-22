@@ -448,7 +448,18 @@ def _apply(mapping: dict[str, Any]) -> None:
 def _load_project_file() -> dict[str, Any]:
     override = os.environ.get("NETSPY_SETTING")
     if override:
-        candidates = [Path(override)]
+        path = Path(override)
+        if not path.is_file():
+            # 默认候选路径（setting.py / settings.py）找不到是常态——把 netspy 当库用、
+            # 没有项目配置文件完全合法，不该吵。但 NETSPY_SETTING 是用户自己明确指定的
+            # 路径，这里找不到十有八九是打错路径 / 部署时文件没放对位置：配置整个没生效，
+            # 却和「压根没配」长得一模一样、零提示——正是这个项目反复栽过的那种静默失效。
+            warnings.warn(
+                f"环境变量 NETSPY_SETTING 指定的配置文件不存在：{path}（配置未生效）",
+                stacklevel=3,
+            )
+            return {}
+        candidates = [path]
     else:
         cwd = Path.cwd()
         candidates = [cwd / "setting.py", cwd / "settings.py"]

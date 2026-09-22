@@ -100,6 +100,23 @@ def test_explicit_setting_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert setting.COLLECTOR_TASK_COUNT == 42
 
 
+def test_missing_explicit_setting_path_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`NETSPY_SETTING` 指定的路径不存在，跟「压根没配」不能是同一种静默。
+
+    不设 `NETSPY_SETTING` 时，默认候选路径（setting.py / settings.py）找不到
+    是常态——把 netspy 当库用没有项目配置文件完全合法，不该吵。但
+    `NETSPY_SETTING` 是用户自己明确指定的路径，找不到十有八九是打错路径 /
+    部署时文件没放对位置：配置整个没生效，却和「压根没配」长得一模一样、
+    零提示——这正是这个项目反复栽过的静默失效的形状。
+    """
+    monkeypatch.setenv("NETSPY_SETTING", str(tmp_path / "does_not_exist.py"))
+    with pytest.warns(UserWarning, match="NETSPY_SETTING 指定的配置文件不存在"):
+        setting.reload()
+    assert setting.SPIDER_THREAD_COUNT == 4  # 保持默认值，不是崩溃
+
+
 def test_reload_restores_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NETSPY_SPIDER_THREAD_COUNT", "99")
     setting.reload()
