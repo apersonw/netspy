@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
+from unittest import mock
 
 import httpx
 import pytest
@@ -167,3 +169,59 @@ def test_ssl_context_passthrough_for_uncacheable() -> None:
     assert ssl_context_for(False) is False
     ctx = _ssl.create_default_context()
     assert ssl_context_for(ctx) is ctx
+
+
+# ---- close_default_downloaders() 必须跟 get_default_downloader() 共用一把锁 --
+def test_close_default_downloaders_does_not_race_with_get_default_downloader() -> None:
+    """回归测试：关闭全部默认下载器时不能被并发的首次构造打断。
+
+    这是实测复现出来的真 bug，跟 `redisdb.close_redis()` 是一模一样的坑——
+    调度器停工作线程用的是**有超时的** `join()`，一个慢请求的 worker 完全
+    可能在下载器整体关闭时还在跑，这时它正并发调 `get_default_downloader()`
+    首次构造某个下载器并写进 `_defaults`。原来的 `close_default_downloaders()`
+    遍历 `_defaults.values()` 时完全不等 `get_default_downloader()` 用的那把
+    锁，字典大小在遍历中途被改变会直接抛
+    `RuntimeError: dictionary changed size during iteration`；
+    即使侥幸没抛，也可能把「刚建好、调用方还没来得及用上」的下载器
+    一起摘走关掉，造成 use-after-close。
+
+    用一个在 `close()` 里暂停的假下载器，强制另一个线程的
+    `get_default_downloader()` 插入恰好落在遍历中途。
+    """
+    from netspy.network import downloader as dl_mod
+
+    dl_mod._defaults.clear()
+
+    paused = threading.Event()
+    proceed = threading.Event()
+
+    pausing = mock.Mock()
+
+    def pausing_close() -> None:
+        paused.set()
+        proceed.wait(timeout=2)
+
+    pausing.close.side_effect = pausing_close
+    dl_mod._defaults["existing"] = pausing
+    for i in range(1, 5):
+        dl_mod._defaults[f"key{i}"] = mock.Mock()
+
+    errors: list[BaseException] = []
+
+    def closer() -> None:
+        try:
+            dl_mod.close_default_downloaders()
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=closer)
+    t.start()
+    assert paused.wait(timeout=2), "没能让 close 卡在遍历中途，测试前提不成立"
+
+    with dl_mod._lock:
+        dl_mod._defaults["brand-new-mid-iteration"] = mock.Mock()
+
+    proceed.set()
+    t.join(timeout=2)
+
+    assert not errors, f"close_default_downloaders() 不该抛异常：{errors}"

@@ -220,9 +220,20 @@ class ProxyClientCache:
             return client, evicted
 
     def drain(self) -> list[Any]:
-        """取出全部并清空 —— 关闭下载器时用。"""
-        items = list(self._items.values())
-        self._items.clear()
+        """取出全部并清空 —— 关闭下载器时用。
+
+        必须和 `get_or_create()` 共用同一把锁：关闭动作和「查或建」不是天然
+        互斥的——调度器停工作线程时用的是**有超时的** `join()`，慢请求的
+        worker 完全可能还在跑，这时 `get_or_create()` 正持锁构造一个新 client
+        准备交给它用，`drain()` 没锁的话会在没有保护的情况下跟这次构造并发
+        操作同一个 `self._items`，快照可能截到一半、也可能把刚建好、
+        调用方还没来得及用上的 client 一起摘走交给调用方去关——
+        对象还在用就被另一个线程关掉，跟 `get_or_create()` 自己文档里
+        警告的 use-after-close 是同一类问题。
+        """
+        with self._lock:
+            items = list(self._items.values())
+            self._items.clear()
         return items
 
 

@@ -104,9 +104,17 @@ def download_request(request: Request, downloader: Downloader | None = None) -> 
 
 
 def close_default_downloaders() -> None:
-    for downloader in _defaults.values():
+    # 快照 + 清空必须和 get_default_downloader() 的写入共用同一把锁：调度器
+    # 停工作线程用的是**有超时的** join，一个慢请求的 worker 完全可能在这里
+    # 跑的时候还没退出、正并发调 get_default_downloader() 首次构造某个下载器
+    # 并写进 _defaults。不加锁遍历的话，跟 close_redis() 是一模一样的坑——
+    # 字典大小在遍历中途被改变，直接 RuntimeError；关闭动作本身也可能跟
+    # 「刚建好、调用方还没来得及用上」的下载器发生 use-after-close。
+    with _lock:
+        downloaders = list(_defaults.values())
+        _defaults.clear()
+    for downloader in downloaders:
         downloader.close()
-    _defaults.clear()
     # 连「真实并发是多少」一起收掉。它是累积取最大的，不重置就会跨爬虫
     # （以及跨用例）泄漏，让下一个爬虫按上一个的线程数分片。
     set_effective_concurrency(None)

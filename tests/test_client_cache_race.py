@@ -129,3 +129,59 @@ def test_cache_hit_does_not_call_the_factory() -> None:
     cache.get_or_create("http://p:1", factory)
     cache.get_or_create("http://p:1", factory)
     assert len(calls) == 1
+
+
+def test_drain_is_mutually_exclusive_with_get_or_create() -> None:
+    """`drain()` 必须跟 `get_or_create()` 共用同一把锁，不能各管各的。
+
+    这是实测复现出来的真缺陷，不是假设性的——调度器停工作线程用的是**有
+    超时的** `join()`（`_JOIN_TIMEOUT`），一个慢请求的 worker 完全可能在
+    下载器 `close()` 时还在跑，这时它正卡在 `get_or_create()` 里持锁构造
+    一个新 client。原来的 `drain()` 完全不等这把锁，会在构造还没完成、
+    调用方还没拿到这个 client 的时候就把 `self._items` 摘空——`close()`
+    紧跟着把 `drain()` 摘到的对象全部关掉，而 `get_or_create()` 马上要把
+    刚建好的这个 client 交给一个正准备发请求的线程用：对象还在用就被
+    另一个线程关掉，跟 `get_or_create()` 自己文档里警告的 use-after-close
+    是同一类问题。
+
+    用一个在持锁期间暂停的 factory，直接验证 `drain()` 不能在
+    `get_or_create()` 释放锁之前就跑完——而不是去赌 GIL 调度能不能撞上
+    `RuntimeError: dictionary changed size during iteration`
+    （`list(dict.values())` 是纯 C 循环，几乎不会被 GIL 切换打断，
+    实测几百万次并发插入都没能靠运气撞出这个异常；但锁没生效本身
+    就是缺陷，不需要等它先造成一次可见的崩溃才算数）。
+    """
+    cache = ProxyClientCache()
+    cache.get_or_create("existing", lambda: _FakeClient(0))
+
+    paused = threading.Event()
+    proceed = threading.Event()
+
+    def pausing_factory() -> _FakeClient:
+        paused.set()
+        proceed.wait(timeout=2)
+        return _FakeClient(1)
+
+    def creator() -> None:
+        cache.get_or_create("new", pausing_factory)
+
+    t1 = threading.Thread(target=creator)
+    t1.start()
+    assert paused.wait(timeout=2), "没能让 get_or_create 卡在持锁的 factory 调用里"
+
+    drain_done = threading.Event()
+
+    def drainer() -> None:
+        cache.drain()
+        drain_done.set()
+
+    t2 = threading.Thread(target=drainer)
+    t2.start()
+    assert not drain_done.wait(timeout=0.3), (
+        "drain() 在 get_or_create() 还没释放锁时就跑完了——两者之间没有互斥，缓存随时可能被并发操作"
+    )
+
+    proceed.set()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+    assert drain_done.is_set()

@@ -86,6 +86,77 @@ def test_get_proxy_pool_singleton_and_disable(monkeypatch: pytest.MonkeyPatch) -
     assert get_proxy_pool() is not first
 
 
+def test_get_proxy_pool_never_returns_none_while_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PROXY_ENABLE=True` 时 `get_proxy_pool()` 绝不能返回 None。
+
+    这是实测复现出来的真缺陷——原来的写法是「查一次、需要就建、最后再重新
+    读一次字典返回」。调度器停工作线程用的是**有超时的** join，一个慢请求
+    的 worker 完全可能在下载器整体关闭时还在跑，这时它正调用
+    `get_proxy_pool()`；如果 `close_proxy_pool()` 恰好插在「查」和「最后
+    那次重读」之间把 `_state["pool"]` 置空，`get_proxy_pool()` 会返回 None，
+    调用方（`_attempt_proxy`）把它当成「压根没开代理池」直接放行直连——
+    而 `PROXY_ENABLE=True` 时绝不该直连，源 IP 会暴露给目标站，
+    这正是开代理池要避免的事。比崩溃更糟：**它不报错、只是悄悄放行**。
+
+    修法是全程只读一次 `_state["pool"]` 到局部变量，返回的是这个局部变量，
+    不是函数末尾对字典的第二次独立读取——这样无论 `close_proxy_pool()`
+    什么时候把字典置空，本次调用早先已经拿到手的池对象不受影响。
+    """
+    monkeypatch.setattr(setting, "PROXY_ENABLE", True)
+    monkeypatch.setattr(setting, "PROXY_EXTRACT_API", "https://p2/l")
+    with respx.mock:
+        respx.get("https://p2/l").mock(return_value=httpx.Response(200, text="1.1.1.1:80"))
+        existing = get_proxy_pool()
+    assert existing is not None
+
+    import threading
+
+    from netspy.network import proxy_pool as pp_mod
+
+    read_count = {"n": 0}
+    paused = threading.Event()
+    proceed = threading.Event()
+
+    class _PausingState(dict):  # type: ignore[type-arg]
+        def __getitem__(self, key: str) -> object:  # type: ignore[override]
+            value = super().__getitem__(key)
+            if key == "pool":
+                read_count["n"] += 1
+                if read_count["n"] == 1:
+                    # 模拟：拿到局部变量之后，close_proxy_pool() 并发把字典置空
+                    paused.set()
+                    proceed.wait(timeout=2)
+            return value
+
+    monkeypatch.setattr(pp_mod, "_state", _PausingState(pp_mod._state))
+
+    result: dict[str, object] = {}
+
+    def getter() -> None:
+        result["pool"] = pp_mod.get_proxy_pool()
+
+    t1 = threading.Thread(target=getter)
+    t1.start()
+    assert paused.wait(timeout=2), "没能让 get_proxy_pool 卡在第一次读取，测试前提不成立"
+
+    def closer() -> None:
+        pp_mod._state["pool"] = None
+
+    t2 = threading.Thread(target=closer)
+    t2.start()
+    t2.join(timeout=2)
+
+    proceed.set()
+    t1.join(timeout=2)
+
+    assert result["pool"] is existing, (
+        f"get_proxy_pool() 返回了 {result['pool']!r}——"
+        "PROXY_ENABLE=True 时不该返回 None，那会让调用方误判成没开代理池直连"
+    )
+
+
 class _SpyPool(ProxyPool):
     def __init__(self) -> None:
         self.handed: list[str] = []
