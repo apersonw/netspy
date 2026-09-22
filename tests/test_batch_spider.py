@@ -97,6 +97,61 @@ def test_memory_store_custom_fields() -> None:
     assert store.count_tasks().done == 1
 
 
+def test_memory_store_mark_task_not_lost_to_concurrent_reset_lost_tasks() -> None:
+    """回归测试：worker 线程 mark_task(DONE) 和 monitor 线程 reset_lost_tasks()
+    并发时，不该出现「任务其实做完了，却被判定成丢了、放回待处理重新抓一遍」。
+
+    这是实测撞到过的真竞态，不是假设性的——`reset_lost_tasks` 原来跟 `mark_task`
+    一样不加锁，「检查 state==DOING 且租约过期」和「写回 TODO」之间不是原子的。
+    只要 worker 线程在这个窗口里把任务标成真正完成，无锁版本就会把它的 DONE
+    覆盖回 TODO，跟 `claim_tasks` 那条注释警告的是同一类问题——GIL 只让窗口变窄，
+    不会让它消失。MySQL 版没有这个问题：`UPDATE ... WHERE state=DOING` 是数据库侧
+    的原子条件更新；内存版的检查和写是两条 Python 语句，必须自己上锁补上等价的原子性。
+
+    用 monkeypatch 在 `self._touched.get(tid, now)` 判定通过之后、`reset_lost_tasks`
+    真正写 TODO 之前强制暂停，把本来靠运气才能踩中的窗口变成确定性的。
+    """
+    store = MemoryBatchStore([{"id": 1}])
+    store.claim_tasks(1)
+    store._touched[1] = time.time() - 1000  # 让 reset_lost_tasks 判定它「丢了」
+
+    paused = threading.Event()
+    proceed = threading.Event()
+
+    class _PausingTouched(dict):  # type: ignore[type-arg]
+        """在 `self._touched.get(tid, now)` 这一步暂停——这是 reset_lost_tasks
+        判定「丢了」的最后一步，暂停点之后紧跟着就是写 TODO。暂停期间让
+        mark_task 并发跑一遍，验证它的写不会被随后的 TODO 覆盖掉。
+
+        必须在这里暂停而不是在 `_state()` 里：`mark_task` 自己也会更新
+        `self._touched`，如果在 `_state()` 处暂停，等 `reset_lost_tasks` 走到
+        这一步再读 `self._touched` 时会读到 mark_task 刚写的新鲜时间戳，
+        「租约过期」判定就会变成假，压根走不到写 TODO 那一步，竞态也就测不出来。
+        """
+
+        def get(self, key: object, default: object = None) -> object:  # type: ignore[override]
+            value = super().get(key, default)
+            if key == 1:
+                paused.set()
+                proceed.wait(timeout=2)
+            return value
+
+    store._touched = _PausingTouched(store._touched)  # type: ignore[assignment]
+
+    monitor = threading.Thread(target=lambda: store.reset_lost_tasks(100.0))
+    monitor.start()
+    assert paused.wait(timeout=2), "monitor 线程没有走到预期的暂停点，测试前提不成立"
+
+    store.mark_task(1, DONE)  # worker 线程：这条任务真的做完了
+    proceed.set()
+    monitor.join(timeout=2)
+
+    assert store._tasks[0]["batch_status"] == DONE, (
+        "mark_task 刚写的 DONE 被 reset_lost_tasks 冲掉了——"
+        "任务明明做完了却被当成丢失，会被重新放回待处理抓一遍"
+    )
+
+
 # ====================================================================== BatchMonitor
 def _drain_worker(
     redis: Any, key: str, store: MemoryBatchStore, *, until: int, retry_ids: set[int]

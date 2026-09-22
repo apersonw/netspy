@@ -177,27 +177,35 @@ class MemoryBatchStore(BatchStore):
         return int(row.get(self._state_field, TODO))
 
     def count_tasks(self) -> TaskCounts:
-        counts = TaskCounts(total=len(self._tasks))
-        buckets = {TODO: "todo", DONE: "done", DOING: "doing", FAILED: "failed"}
-        for row in self._tasks:
-            attr = buckets.get(self._state(row))
-            if attr is not None:
-                setattr(counts, attr, getattr(counts, attr) + 1)
-        return counts
+        with self._lock:
+            counts = TaskCounts(total=len(self._tasks))
+            buckets = {TODO: "todo", DONE: "done", DOING: "doing", FAILED: "failed"}
+            for row in self._tasks:
+                attr = buckets.get(self._state(row))
+                if attr is not None:
+                    setattr(counts, attr, getattr(counts, attr) + 1)
+            return counts
 
     def reset_all_tasks(self) -> None:
-        for row in self._tasks:
-            row[self._state_field] = TODO
-        self._touched.clear()
+        with self._lock:
+            for row in self._tasks:
+                row[self._state_field] = TODO
+            self._touched.clear()
 
     def reset_lost_tasks(self, stale_seconds: float) -> int:
+        # 加锁：跟 claim_tasks 是同一类「检查再写」竞态——如果 worker 线程正好在这个
+        # 窗口里通过 mark_task() 把任务标成真正完成，无锁的话这里会把它冲回待处理，
+        # 一个刚做完的任务被当成「丢了」重新抓一遍。MySQL 版天生没这个问题
+        # （`UPDATE ... WHERE state=DOING` 是数据库侧的原子条件更新），
+        # 内存版的检查和写是两条 Python 语句，必须自己上锁补上等价的原子性。
         now = time.time()
         reset = 0
-        for row in self._tasks:
-            tid = row[self._id_field]
-            if self._state(row) == DOING and now - self._touched.get(tid, now) >= stale_seconds:
-                row[self._state_field] = TODO
-                reset += 1
+        with self._lock:
+            for row in self._tasks:
+                tid = row[self._id_field]
+                if self._state(row) == DOING and now - self._touched.get(tid, now) >= stale_seconds:
+                    row[self._state_field] = TODO
+                    reset += 1
         return reset
 
     def claim_tasks(self, limit: int) -> list[dict[str, Any]]:
@@ -216,11 +224,14 @@ class MemoryBatchStore(BatchStore):
             return claimed
 
     def mark_task(self, task_id: Any, state: int) -> None:
-        for row in self._tasks:
-            if row[self._id_field] == task_id:
-                row[self._state_field] = state
-                self._touched[task_id] = time.time()
-                return
+        # 加锁：跟 claim_tasks/reset_lost_tasks 共享同一份 self._tasks/self._touched，
+        # 多个 worker 线程会并发调它（BatchSpider.update_task 就是从 worker 线程调的）
+        with self._lock:
+            for row in self._tasks:
+                if row[self._id_field] == task_id:
+                    row[self._state_field] = state
+                    self._touched[task_id] = time.time()
+                    return
 
 
 # ======================================================================
