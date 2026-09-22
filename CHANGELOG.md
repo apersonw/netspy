@@ -3,6 +3,18 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] - 2026-09-22
+
+### 修复
+
+- Playwright 渲染下载器的反检测补丁从手写 4 行升级成完整版：新增可选依赖
+  `playwright-stealth`（`netspy[render]` 自动带上），默认把 WebGL
+  vendor/renderer 伪装成常见 Intel 核显。原来那份补丁只处理了
+  `navigator.webdriver`/`plugins`/`languages`，没有 GPU 的容器里跑
+  headless Chrome 时 WebGL 会暴露 `SwiftShader`（软件渲染）这个明确的
+  自动化信号，是实测撞到过的真实拦截原因。行为向后兼容——
+  `WEBDRIVER["stealth"]` 默认仍是开启，未显式关闭的现有用法不受影响。
+
 ## [1.1.0] - 2026-09-16
 
 ### 新增
