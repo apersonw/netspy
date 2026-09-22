@@ -5,6 +5,7 @@ respx 只能拦 httpx，所以这里一律打真实本地 socket（pytest-httpse
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 
 import pytest
@@ -150,6 +151,64 @@ def test_session_reuse_keeps_one_session(httpserver: HTTPServer) -> None:
     finally:
         dl.close()
     assert len(dl._sessions) == 0
+
+
+def test_cookie_jar_shared_across_session_shards(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归测试：同一个代理（含"没配代理"这个值）的不同分片必须共享同一个
+    cookie jar，不能因为分片就各过各的、互相看不见对方种下的 cookie。
+
+    不是假设性的——`_jar_for()`/`_session_for_proxy()` 的文档字符串里明确
+    记着这是个真出过的 bug："第一版只有它的 1/片数，代理一多 jar 先被换出，
+    同代理的两个分片就分家了"。修复本身当时没有测试守着，升级/重构很容易
+    悄悄退化回去。
+
+    用真实线程而不是直接摆弄内部计数器——分片用的 `shard_index` 是按线程
+    分配的 thread-local 值，伪造它反而测不出真实场景；两个线程顺序执行
+    （full join 再起下一个）保证拿到的是连续的分片计数，`% 2` 后必然落在
+    两个不同分片，断言不会因为测试执行顺序而偶发抖动。
+    """
+    monkeypatch.setattr(setting, "CURL_SESSION_SHARD_THREADS", 1)
+    monkeypatch.setattr(setting, "SPIDER_THREAD_COUNT", 2)
+
+    seen_cookies: list[str] = []
+
+    def handler(request: WerkzeugRequest) -> WerkzeugResponse:
+        seen_cookies.append(request.headers.get("Cookie", ""))
+        resp = WerkzeugResponse("ok")
+        resp.set_cookie("sid", "abc123")
+        return resp
+
+    httpserver.expect_request("/c").respond_with_handler(handler)
+    url = httpserver.url_for("/c")
+
+    dl = CurlDownloader(use_session=True)
+    sessions: list[object] = []
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            dl.download(Request(url))
+            session, _, _ = dl._session_for(Request(url))
+            sessions.append(session)
+        except BaseException as exc:  # 子线程异常要带回主线程才能断言
+            errors.append(exc)
+
+    try:
+        t1 = threading.Thread(target=worker)
+        t1.start()
+        t1.join()
+        t2 = threading.Thread(target=worker)
+        t2.start()
+        t2.join()
+    finally:
+        dl.close()
+
+    assert not errors, f"子线程里出错：{errors}"
+    assert len(sessions) == 2
+    assert sessions[0] is not sessions[1], "两个线程没有真的分到两片，测试前提不成立"
+    assert seen_cookies[1] == "sid=abc123", "第二个分片应该能看到第一个分片种下的 cookie"
 
 
 def test_close_is_idempotent() -> None:
