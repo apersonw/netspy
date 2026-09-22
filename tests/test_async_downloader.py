@@ -103,6 +103,43 @@ def test_worker_threads_do_not_each_get_a_loop(downloader: AsyncHttpxDownloader)
     assert len(loop_threads) < 12
 
 
+@respx.mock
+def test_cookie_jar_shared_across_event_loop_shards() -> None:
+    """回归测试：不同事件循环分片必须共享同一份 cookie jar，登录态这类状态
+    不能因为落到不同分片就丢。
+
+    这是实测撞到过的真 bug，不是假设性的——`AsyncHttpxDownloader` 原来完全
+    没有 `_httpx.py`/`_curl.py` 那套「跨分片共享 jar」的机制，每个分片的
+    `AsyncClient` 各自持有独立的 cookie jar，第一个分片落的登录 cookie，
+    下一个请求分到另一个分片就看不见了，而且是静默的、不报错。
+    """
+    seen_cookies: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_cookies.append(request.headers.get("cookie", ""))
+        return httpx.Response(200, headers={"set-cookie": "sid=abc123"})
+
+    respx.get("https://example.com/c").mock(side_effect=handler)
+
+    dl = AsyncHttpxDownloader(concurrency=8, loops=2)
+    try:
+        assert len(dl._shards) == 2, "没有真的分到两片，测试前提不成立"
+
+        def worker() -> None:
+            dl.download(Request("https://example.com/c"))
+
+        t1 = threading.Thread(target=worker)
+        t1.start()
+        t1.join()
+        t2 = threading.Thread(target=worker)
+        t2.start()
+        t2.join()
+    finally:
+        dl.close()
+
+    assert seen_cookies == ["", "sid=abc123"], "第二个分片应该能看到第一个分片种下的 cookie"
+
+
 def test_close_is_idempotent() -> None:
     """关两次不抛，且循环线程真的都收掉了。
 

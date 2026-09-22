@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+from http.cookiejar import CookieJar
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -92,11 +93,17 @@ class _Shard:
 
     **每片的东西不能跨片用**：`httpx.AsyncClient` 绑定在创建它的那个事件循环上，
     拿到别的循环里去用会挂在错误的 loop 上。
+
+    但 cookie jar 是例外——见 `AsyncHttpxDownloader._jars` 的说明，它是**跨分片
+    共享**的，`_Shard` 自己不持有 jar，只在构造 client 时从外面传进来的共享缓存
+    里取。
     """
 
     __slots__ = ("client", "loop", "proxied", "sem", "thread")
 
-    def __init__(self, index: int, concurrency: int, verify: Any) -> None:
+    def __init__(
+        self, index: int, concurrency: int, verify: Any, jars: ProxyClientCache, jar_capacity: int
+    ) -> None:
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(
             target=self.loop.run_forever, name=f"async-downloader-{index}", daemon=True
@@ -107,12 +114,14 @@ class _Shard:
         # 有代理时原来每个请求建一个一次性 client —— 一轮全新的 TLS 握手 +
         # 代理隧道。实测 5 个请求建 5 个。改成按代理缓存复用
         self.proxied = ProxyClientCache()
-        self.submit(self._setup(concurrency, verify))
+        self.submit(self._setup(concurrency, verify, jars, jar_capacity))
 
     def submit(self, coro: Any) -> Any:
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
 
-    async def _setup(self, concurrency: int, verify: Any) -> None:
+    async def _setup(
+        self, concurrency: int, verify: Any, jars: ProxyClientCache, jar_capacity: int
+    ) -> None:
         kwargs: dict[str, Any] = {
             "follow_redirects": True,
             "verify": ssl_context_for(verify),
@@ -124,6 +133,10 @@ class _Shard:
         }
         if setting.HTTPX_HTTP2:
             kwargs["http2"] = True
+        # 「没配代理」也是一个身份，取跟真实代理同一套共享 jar 缓存（key=None）——
+        # 不然这个默认 client 的 cookie 只活在这一个分片里，见类文档字符串
+        jar, _ = jars.get_or_create(None, CookieJar, capacity=jar_capacity)
+        kwargs["cookies"] = jar
         self.client = httpx.AsyncClient(**kwargs)
         self.sem = asyncio.Semaphore(concurrency)
 
@@ -140,8 +153,21 @@ class AsyncHttpxDownloader(Downloader):
         self._timeout = timeout
         self._verify = verify
         self._concurrency = int(concurrency or setting.DOWNLOADER_ASYNC_CONCURRENCY)
-        n_loops = loops if loops is not None else loop_count()
-        self._shards = [_Shard(i, self._concurrency, self._verify) for i in range(max(n_loops, 1))]
+        n_loops = max(loops if loops is not None else loop_count(), 1)
+        # 按「实际使用的代理」（含 None＝没配代理）共享 cookie jar，**跨所有分片
+        # 共用同一份缓存**——否则登录态这类状态会在分片间分家：分片各自持有
+        # 独立的 AsyncClient，httpx 默认给每个 client 建一个不共享的 jar，第一
+        # 个请求落的登录 cookie，下一个请求分到另一个分片就看不见了。
+        # 跟 `_httpx.py`/`_curl.py` 的 `_jar_for()` 是同一个模式，只是那两个是
+        # 「同一个代理的多个线程分片」，这里是「同一个代理的多个事件循环分片」。
+        # 容量用跟 client 缓存一样放大的数，道理也一样：jar 的寿命必须盖过
+        # client 的，撑到分片数那么多份才不会先被挤出去。
+        self._jars = ProxyClientCache()
+        self._jar_capacity = max(setting.SESSION_CACHE_SIZE, 1) * n_loops
+        self._shards = [
+            _Shard(i, self._concurrency, self._verify, self._jars, self._jar_capacity)
+            for i in range(n_loops)
+        ]
 
     # ------------------------------------------------------------------
     def _shard(self) -> _Shard:
@@ -160,9 +186,16 @@ class AsyncHttpxDownloader(Downloader):
         """这个代理对应的连接池。换出的要 `await aclose()` —— 异步 client 的关法
         和同步不一样，在同步上下文里调 close() 会留下没关的连接。
 
-        **缓存是每片一份**：AsyncClient 绑定在创建它的事件循环上，
-        跨片复用会把它挂到别的 loop 上去。
+        **client 缓存是每片一份**（AsyncClient 绑定在创建它的事件循环上，跨片
+        复用会把它挂到别的 loop 上去），**但 cookie jar 是跨片共享的**——
+        `self._jars` 是 `AsyncHttpxDownloader` 级别的，不是 `shard.proxied`
+        那种每片一份。
+
+        ⚠️ **每次都摸一下共享 jar**，不只在新建 client 时摸——原因跟
+        `_httpx.py` 的 `_jar_for()` 一样：一个 client 很热、从不重建，它的
+        jar 在 `self._jars` 的 LRU 里却是冷的，照样会被别的代理挤出去。
         """
+        jar, _ = self._jars.get_or_create(proxy, CookieJar, capacity=self._jar_capacity)
 
         def _build() -> httpx.AsyncClient:
             return httpx.AsyncClient(
@@ -170,6 +203,7 @@ class AsyncHttpxDownloader(Downloader):
                 verify=ssl_context_for(verify),
                 proxy=proxy,
                 limits=pool_limits(self._concurrency),
+                cookies=jar,
             )
 
         client, evicted_list = shard.proxied.get_or_create(proxy, _build)
