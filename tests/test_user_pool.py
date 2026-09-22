@@ -146,6 +146,42 @@ def test_redis_pool_require_cookies_returns_user_once_published(rds: Any) -> Non
     assert user.cookies == {"web_session": "abc"}
 
 
+def test_redis_pool_malformed_cached_cookie_treated_as_not_ready(rds: Any) -> None:
+    """回归测试：Redis 里缓存的 Cookie 值不是合法 JSON（外部服务写坏 / 写半截 /
+    人工改坏）时，get() 不该直接把 JSONDecodeError 炸出去。
+
+    `UserPoolMiddleware._wait_for_user()` 调 `pool.get()` 时没有包 try/except，
+    一炸就是整条请求处理链路跟着崩——比"这个号暂时不可用"严重得多，应该跟
+    `test_redis_pool_require_cookies_treats_missing_cookie_as_not_ready` 一样
+    优雅降级，而不是崩。
+    """
+    rds.set("p7:cookie:a", "this is not valid json{{{")
+    pool = RedisUserPool(
+        "p7",
+        [{"username": "a"}],
+        redis_client=rds,
+        require_cookies=True,
+        not_ready_retry_seconds=999,
+    )
+    assert pool.get() is None  # 不炸，当成暂不可用
+    # 放回冷却队列了，不是丢失
+    assert rds.zscore("p7:users:ready", "a") is not None
+
+
+def test_redis_pool_malformed_cached_cookie_without_require_cookies_falls_back_to_empty(
+    rds: Any,
+) -> None:
+    """同样的坏数据，`require_cookies=False` 时该退回「没有 Cookie 但照常发号」
+    这个既有行为（跟 `test_redis_pool_without_require_cookies_keeps_old_behavior`
+    对称），而不是崩，也不是意外地判定成「不可用」。
+    """
+    rds.set("p8:cookie:a", "{not json")
+    pool = RedisUserPool("p8", [{"username": "a"}], redis_client=rds)
+    user = pool.get()
+    assert user is not None
+    assert user.cookies == {}
+
+
 def test_redis_pool_without_require_cookies_keeps_old_behavior(rds: Any) -> None:
     # require_cookies 默认 False：没有 login、没有缓存 Cookie 时仍然发出账号——
     # 这是改动前就有的行为，不能因为新参数破坏掉。

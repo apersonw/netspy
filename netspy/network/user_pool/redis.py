@@ -62,8 +62,19 @@ class RedisUserPool(UserPool):
 
         user = self._accounts.get(username) or User(username=username)
         cached = self._r.get(self._cookie_prefix + username)
+        cookies: dict[str, str] | None = None
         if cached:
-            user.cookies = tools.loads_json(cached)
+            try:
+                cookies = tools.loads_json(cached)
+            except Exception:
+                # 外部保活服务写坏过 / 写半截、Redis 数据被手工改坏，都可能
+                # 走到这——跟「压根没有缓存」一样处理，不能让 get() 直接炸出去：
+                # 调用方（UserPoolMiddleware._wait_for_user）没有包 try/except，
+                # 一炸就是整条请求处理链路跟着崩，比「这个号暂时不可用」严重得多。
+                log.warning("账号 {} 缓存的 Cookie 不是合法 JSON，当作没有缓存处理", username)
+
+        if cookies is not None:
+            user.cookies = cookies
         elif self._login is not None:
             try:
                 user.cookies = dict(self._login(user) or {})
