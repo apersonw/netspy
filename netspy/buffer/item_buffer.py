@@ -99,9 +99,30 @@ class ItemBuffer(threading.Thread):
         """`owner` 产出的数据整批落库之后再执行 `fn`。
 
         落库失败时**不执行** —— 让上游的状态留在「处理中」，由防丢机制回收重跑。
+
+        ⚠️ 只有在能确定 `owner` **此刻**还压在缓冲里时才该调用这个方法——
+        调用方如果先用 `owns()` 查了一遍再决定要不要调用这个方法，中间有
+        没上锁的空档：`flush()` 完全可能正好夹在两次调用之间跑完，等这里真正
+        登记上钩子时，那一批早就已经处理完、`_run_after_persist` 也跑过了
+        （pop 到空，什么都没做）——钩子从此再也不会被执行。这种「先查后做」
+        的场景应该用 `after_persist_if_pending()`，把检查和登记锁在同一次里。
         """
         with self._lock:
             self._after_persist.setdefault(id(owner), []).append(fn)
+
+    def after_persist_if_pending(self, owner: Any, fn: Any) -> bool:
+        """`owner` 还压在缓冲里就登记 `fn`（返回 True）；已经 flush 过就不登记
+        （返回 False，调用方该走「立刻处理」的路径）。
+
+        检查和登记在同一次加锁里做完，不给 `flush()` 留插队空档——
+        这正是 `owns()` 后面紧跟一次独立加锁的 `after_persist()` 会踩的坑：
+        `flush()` 一旦插进这两次调用中间，钩子就永远不会被执行了。
+        """
+        with self._lock:
+            if not any(o is owner for _, o in self._pending):
+                return False
+            self._after_persist.setdefault(id(owner), []).append(fn)
+            return True
 
     def put(self, item: Any, owner: Any = None) -> None:
         with self._lock:

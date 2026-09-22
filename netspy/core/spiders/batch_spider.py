@@ -118,10 +118,17 @@ class BatchSpider(BaseParser):
             return
         buffer = context.get_current_item_buffer()
         request = context.get_current_request()
-        if buffer is None or request is None or not buffer.owns(request):
+        # 用原子的 after_persist_if_pending 而不是「先 owns() 查再 after_persist()
+        # 登记」——那样中间有没上锁的空档，flush() 一旦插进去，钩子就再也不会
+        # 被执行，任务永远卡在「处理中」直到租约到期才被重新捞回来
+        if (
+            buffer is None
+            or request is None
+            or not buffer.after_persist_if_pending(
+                request, lambda: self._store.mark_task(task_id, DONE)
+            )
+        ):
             self._store.mark_task(task_id, DONE)
-            return
-        buffer.after_persist(request, lambda: self._store.mark_task(task_id, DONE))
 
     def failed_request(self, request: Request, response: Response | None) -> Iterable[Any] | None:
         """重试耗尽后：把对应任务标为失败。覆写时记得 super()。"""

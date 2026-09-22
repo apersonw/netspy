@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pytest
@@ -111,6 +112,133 @@ def test_marking_failed_is_never_deferred() -> None:
     buf.put({"url": "x"}, owner=request)
     spider.update_task(1, ok=False)
     assert store.count_tasks().failed == 1
+
+
+def test_after_persist_if_pending_excludes_concurrent_flush() -> None:
+    """回归测试：`ItemBuffer.after_persist_if_pending()` 判断「owner 还在不在
+    pending 里」和登记「落库后回调」必须是同一次加锁做完的原子操作。
+
+    这是实测复现出来的真竞态，不是假设性的——`BatchSpider.update_task()`
+    原来是先调 `buffer.owns(request)` 查一遍，再独立加锁调
+    `buffer.after_persist(...)` 登记钩子。这两次调用之间没有锁保护：只要
+    `flush()` 恰好插在中间跑完，这一批（连同这个 owner）已经处理完、
+    `_run_after_persist` 也跑过了（pop 到空，什么都没做）——等 `after_persist`
+    真正登记上钩子时已经没人会再触发它了，`mark_task(DONE)` 永远不会被调用，
+    任务卡在「处理中」直到租约到期才被重新捞回来重跑一遍。
+
+    自然的多线程压力测试测不出这个窗口——`put()` 和紧跟着的检查之间都是纯
+    Python 操作，没有 I/O 让出 GIL，运气好的话线程调度永远踩不中那几条字节码
+    宽的窗口。所以这里直接验证根本的互斥性质：`after_persist_if_pending`
+    持锁期间，并发的 `flush()` 必须被真正挡住，不能抢跑。
+    """
+    calls: list[Any] = []
+    buf = ItemBuffer(Stats(), handler=lambda items: calls.append(list(items)))
+    owner = object()
+    buf.put({"x": 1}, owner=owner)
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_lock = buf._lock
+
+    class _PausingLock:
+        def __enter__(self) -> None:
+            real_lock.acquire()
+            entered.set()
+            release.wait(timeout=2)
+
+        def __exit__(self, *exc: object) -> None:
+            real_lock.release()
+
+    buf._lock = _PausingLock()  # type: ignore[assignment]
+
+    hook_fired = threading.Event()
+    registered: dict[str, bool] = {}
+
+    def call_after_persist() -> None:
+        registered["ok"] = buf.after_persist_if_pending(owner, lambda: hook_fired.set())
+
+    t1 = threading.Thread(target=call_after_persist)
+    t1.start()
+    assert entered.wait(timeout=2), "没能进入临界区，测试前提不成立"
+
+    flush_done = threading.Event()
+
+    def call_flush() -> None:
+        buf.flush()
+        flush_done.set()
+
+    t2 = threading.Thread(target=call_flush)
+    t2.start()
+    assert not flush_done.wait(timeout=0.3), (
+        "flush() 在 after_persist_if_pending 还持锁的时候就跑完了——"
+        "两者没有互斥，钩子随时可能被冲掉而永远不会执行"
+    )
+
+    release.set()
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+
+    assert registered.get("ok") is True
+    assert flush_done.is_set()
+    assert hook_fired.is_set(), "钩子应该在 flush 完成之后被正确执行"
+
+
+def test_update_task_does_not_race_with_flush() -> None:
+    """集成回归测试：确认 `BatchSpider.update_task` 走的是原子路径，
+    「确认还在 pending 里」和「登记落库回调」之间不露没上锁的空档。
+
+    用 monkeypatch 在 `owns()` 判定为真之后暂停：如果 `update_task` 退化回
+    旧的 `owns()` + `after_persist()` 两步式写法，会精确卡在这个空档上，
+    这时候插一次 `flush()` 进去，钩子就该再也不会被触发——最终任务
+    标不上 DONE。走的是原子路径（`after_persist_if_pending`）的话，
+    `update_task` 压根不会调 `owns()`，这个 monkeypatch 不会被触发，
+    行为应该照常。
+    """
+    store = MemoryBatchStore([{"id": 1}])
+    store.claim_tasks(1)
+    buf = _buffer(f"{__name__}._Pipeline")
+    spider = _spider(store)
+    request = Request("http://example.com/p/1")
+
+    buf.put({"url": "x"}, owner=request)  # put 本身跟 context 无关，主线程调没问题
+
+    paused = threading.Event()
+    proceed = threading.Event()
+    orig_owns = buf.owns
+
+    def patched_owns(owner: Any) -> bool:
+        result = orig_owns(owner)
+        if result:
+            paused.set()
+            proceed.wait(timeout=2)
+        return result
+
+    buf.owns = patched_owns  # type: ignore[method-assign]
+
+    def worker() -> None:
+        # context 是线程本地的（worker 就是多线程，这是故意的），必须在
+        # 真正调用 update_task 的这个线程里设置，跟 ParserWorker 的真实用法一致——
+        # 否则 update_task 会因为「查不到当前请求」直接走立即写路径，
+        # 这个测试就测不到「查还在不在」和「登记回调」之间的空档了
+        context.set_current(request, buf)
+        try:
+            spider.update_task(1, ok=True)
+        finally:
+            context.set_current(None, None)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    hit_old_path = paused.wait(timeout=0.3)
+    if hit_old_path:
+        buf.flush()  # 抢在旧路径的空档里跑一次 flush
+        proceed.set()
+    t.join(timeout=2)
+
+    buf.flush()  # 收尾：如果走的是新路径，这里才是真正落库的地方
+    assert store.count_tasks().done == 1, (
+        "任务的 DONE 回调丢了——update_task 在「查还在不在」和「登记回调」"
+        "之间露出了没上锁的空档，被并发的 flush() 抢先处理掉了"
+    )
 
 
 def test_no_request_context_marks_immediately() -> None:
