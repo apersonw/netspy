@@ -39,7 +39,7 @@ Changelog = "https://github.com/apersonw/netspy/blob/main/CHANGELOG.md"
 Issues = "https://github.com/apersonw/netspy/issues"
 
 [project.optional-dependencies]
-render = ["playwright>=1.44"]
+render = ["playwright>=1.44", "playwright-stealth>=2.0"]
 mongo = ["pymongo>=4.7"]
 mysql = ["pymysql>=1.1", "dbutils>=3.0"]
 redis = ["redis>=5.0"]
@@ -131,6 +131,7 @@ module = [
     "psycopg_pool.*",
     "elasticsearch.*",
     "kafka.*",
+    "playwright_stealth.*",
 ]
 ignore_missing_imports = true
 

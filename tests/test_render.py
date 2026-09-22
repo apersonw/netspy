@@ -136,6 +136,53 @@ def test_pool_close_stops_render_threads(js_url: str) -> None:
     assert threading.active_count() == baseline
 
 
+def test_stealth_script_covers_known_evasions() -> None:
+    """不需要真浏览器的快速检查——防止升级 playwright-stealth 或改配置时
+    悄悄漏掉这几个关键 evasion（webdriver 隐藏、WebGL 伪装、语言覆盖）。"""
+    from netspy.network.downloader._playwright import _stealth_script
+
+    script = _stealth_script()
+    assert "webdriver" in script
+    assert "zh-CN" in script
+    # 默认的 WebGL 伪装目标——防止这块 evasion 被悄悄关掉或改错
+    assert "Intel" in script
+
+
+def test_stealth_hides_automation_and_webgl_signals(
+    pool: PlaywrightDownloader, httpserver: HTTPServer
+) -> None:
+    """真实浏览器回归测试：验证反检测补丁真的生效，不是只测脚本字符串里有没有
+    这几个词。
+
+    实测过没打补丁的裸 headless Chromium 是什么样：``navigator.webdriver``
+    是 ``True``、WebGL vendor/renderer 会暴露 ``SwiftShader``（软件渲染，
+    没有真实 GPU 的容器里跑 headless Chrome 的典型指纹）——这两个信号是这次
+    从 stealth.min.js 换成完整版 ``playwright-stealth`` 的直接理由，不是理论
+    风险，是在小红书上真实撞到过的拦截原因。
+    """
+    httpserver.expect_request("/probe").respond_with_data(
+        "<html><body></body></html>", content_type="text/html"
+    )
+
+    def script(page: Any) -> None:
+        page.evaluate("""() => {
+            const canvas = document.createElement('canvas');
+            const gl = canvas.getContext('webgl');
+            const dbg = gl && gl.getExtension('WEBGL_debug_renderer_info');
+            const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : 'no-webgl';
+            document.body.innerHTML =
+                '<div id="webdriver">' + navigator.webdriver + '</div>' +
+                '<div id="renderer">' + renderer + '</div>' +
+                '<div id="lang">' + navigator.languages.join(',') + '</div>';
+        }""")
+
+    resp = pool.download(Request(httpserver.url_for("/probe"), render=True, render_script=script))
+    assert '<div id="webdriver">false</div>' in resp.text
+    assert "SwiftShader" not in resp.text
+    assert "Intel" in resp.text
+    assert '<div id="lang">zh-CN,zh</div>' in resp.text
+
+
 def test_spider_with_render_end_to_end(
     chromium_ok: bool, httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

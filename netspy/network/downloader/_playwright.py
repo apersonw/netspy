@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from netspy import setting
@@ -26,13 +27,32 @@ if TYPE_CHECKING:
 
 log = get_logger("downloader.playwright")
 
-_STEALTH_JS = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-window.chrome = window.chrome || { runtime: {} };
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-"""
 _BLOCKED_RESOURCES = frozenset({"image", "media", "font"})
+
+
+@lru_cache(maxsize=1)
+def _stealth_script() -> str:
+    """反检测注入脚本——第三方 MIT 库 ``playwright-stealth``（跟 Netspy 一样是
+    宽松开源协议，随手能用；不是从任何 NON-COMMERCIAL 协议的项目抄的代码，是
+    它们也在用的同一个上游库）生成的完整版 evasion 集合，换掉了早期这里手写
+    的 4 行版本。那 4 行只处理了 `navigator.webdriver`/`plugins`/`languages`，
+    覆盖不了 WebGL vendor/renderer 这类更深的指纹——无 GPU 的容器里跑
+    headless Chrome，WebGL 默认会暴露 "SwiftShader"（软件渲染）这种明确的
+    自动化信号，这是实测撞到过的真实拦截原因，不是理论风险。这个库默认会把
+    WebGL 伪装成一块常见的 Intel 核显，同时还处理了 iframe.contentWindow、
+    chrome.runtime、media codecs 等一整套 puppeteer-extra-plugin-stealth 的
+    证据集合。
+
+    语言覆盖沿用框架原来的选择（中文站点优先）；其余全部用库自己的默认值——
+    这些默认值本身就是社区长期验证过的组合，没有实测依据之前不去手动调它们。
+
+    结果只取决于常量参数，跨线程复用同一份是安全的，用 `lru_cache` 避免每个
+    渲染线程都重新生成一遍这份 40KB+ 的脚本。
+    """
+    from playwright_stealth import Stealth
+
+    payload: str = Stealth(navigator_languages_override=("zh-CN", "zh")).script_payload
+    return payload
 
 
 #: `submit()` 兜底等待在渲染超时之上再留的余量（秒）。
@@ -121,7 +141,7 @@ class _RenderWorker(threading.Thread):
         if not cfg.get("load_images", False):
             self._context.route("**/*", _maybe_block)
         if cfg.get("stealth", True):
-            self._context.add_init_script(_STEALTH_JS)
+            self._context.add_init_script(_stealth_script())
         log.debug("渲染线程 {} 已启动 {}", self.name, cfg.get("browser", "chromium"))
 
     def _render(self, request: Request) -> Response:
