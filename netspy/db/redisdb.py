@@ -31,10 +31,17 @@ def get_redis(url: str | None = None) -> Any:
 
 
 def close_redis() -> None:
-    for client in _clients.values():
+    # 摘出快照再清空必须和 get_redis() 的写入共用同一把锁：不加锁的话，
+    # get_redis() 并发插入新 key 会在这里遍历到一半改变字典大小，
+    # 直接抛 RuntimeError（且抛在 for 循环自己的 __next__ 里，不在下面
+    # 那个只包住 client.close() 的 suppress 范围内）——不仅崩，
+    # 崩之前没关的连接、崩之后残留的新 key 都清不掉。
+    with _lock:
+        clients = list(_clients.values())
+        _clients.clear()
+    for client in clients:
         with contextlib.suppress(Exception):
             client.close()
-    _clients.clear()
 
 
 def key(*parts: str) -> str:

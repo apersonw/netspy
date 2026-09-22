@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from typing import Any
+from unittest import mock
 
 import fakeredis
 import pytest
@@ -36,6 +38,67 @@ def test_get_redis_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     assert a is b
     assert made == ["redis://x/0"]
     redisdb.close_redis()
+
+
+def test_close_redis_does_not_race_with_concurrent_get_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归测试：`close_redis()` 遍历 `_clients` 时不能被并发的 `get_redis()`
+    插入新 key 打断。
+
+    这是实测复现出来的真 bug，不是假设性的——`get_redis()` 的写入
+    （`_clients[url] = client`）一直是靠 `_lock` 保护的，但 `close_redis()`
+    的遍历 + `.clear()` 原来完全没加锁。只要遍历到一半，另一个线程的
+    `get_redis()` 插入了一个新 URL（字典大小变了），Python 会直接在
+    for 循环自己的迭代步骤上抛 ``RuntimeError: dictionary changed size
+    during iteration``——这个异常不在 `contextlib.suppress` 的保护范围内
+    （那层 suppress 只包住了 `client.close()` 这一句，包不住 for 循环本身），
+    会整个从 `close_redis()` 里炸出去；崩溃之前排在后面、还没关的连接
+    也就没能力再关了。
+
+    用一个在 `close()` 里暂停的 mock client，强制让另一个线程的
+    `get_redis()` 插入恰好落在遍历中途。
+    """
+    redisdb._clients.clear()
+    try:
+        paused = threading.Event()
+        proceed = threading.Event()
+
+        pausing_client = mock.Mock()
+
+        def pausing_close() -> None:
+            paused.set()
+            proceed.wait(timeout=2)
+
+        pausing_client.close.side_effect = pausing_close
+        redisdb._clients["url0"] = pausing_client
+        for i in range(1, 5):
+            redisdb._clients[f"url{i}"] = mock.Mock()
+
+        errors: list[BaseException] = []
+
+        def closer() -> None:
+            try:
+                redisdb.close_redis()
+            except BaseException as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=closer)
+        t.start()
+        assert paused.wait(timeout=2), "没能让 close_redis 卡在迭代中途，测试前提不成立"
+
+        monkeypatch.setattr(
+            redisdb.redis.Redis, "from_url", staticmethod(lambda url, **_: mock.Mock())
+        )
+        redisdb.get_redis("brand-new-url-mid-iteration")
+
+        proceed.set()
+        t.join(timeout=2)
+
+        assert not errors, f"close_redis() 不该抛异常：{errors}"
+        pausing_client.close.assert_called_once()
+    finally:
+        redisdb._clients.clear()
 
 
 def test_key_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
