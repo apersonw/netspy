@@ -287,13 +287,26 @@ class PlaywrightDownloader(Downloader):
         self._lock = threading.Lock()
 
     def download(self, request: Request) -> Response:
-        if self._pool is None:
+        # 全程只读一次 self._pool 到局部变量再用它，不在函数末尾重新读一遍
+        # 实例属性——调度器停工作线程用的是**有超时的** join，一个慢渲染
+        # 请求的 worker 完全可能在下载器 close() 时还在跑。原来的写法是
+        # `return self._pool.submit(request)`，在锁外重新读了一次 self._pool：
+        # close() 恰好在这中间把它置 None 的话，会直接
+        # AttributeError: 'NoneType' object has no attribute 'submit'。
+        # 跟 proxy_pool.get_proxy_pool() 是同一类坑，实测复现过。
+        pool = self._pool
+        if pool is None:
             with self._lock:
-                if self._pool is None:
-                    self._pool = _RenderPool(self._config)
-        return self._pool.submit(request)
+                pool = self._pool
+                if pool is None:
+                    pool = _RenderPool(self._config)
+                    self._pool = pool
+        return pool.submit(request)
 
     def close(self) -> None:
-        if self._pool is not None:
-            self._pool.close()
+        # 置空和读取必须和 download() 共用同一把锁，理由同上
+        with self._lock:
+            pool = self._pool
             self._pool = None
+        if pool is not None:
+            pool.close()

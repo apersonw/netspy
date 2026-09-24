@@ -16,6 +16,7 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -106,6 +107,77 @@ def test_finished_job_is_not_overwritten_by_drain() -> None:
     job.event.set()
     job.fail(RuntimeError("晚到的收尾"))
     assert job.error is None, "已经完成的任务被排空覆盖成失败了"
+
+
+def test_downloader_close_does_not_race_with_in_flight_download() -> None:
+    """`PlaywrightDownloader.close()` 不能让并发中的 `download()` 崩掉。
+
+    这是实测复现出来的真 bug——`download()` 原来的写法是双重检查锁建完
+    `self._pool` 之后，最后一行 `return self._pool.submit(request)`
+    **在锁外重新读了一次** `self._pool`。调度器停工作线程用的是**有超时的**
+    join，一个慢渲染请求的 worker 完全可能在下载器整体 `close()` 时还在跑；
+    `close()` 恰好在这次重读之前把 `self._pool` 置 None 的话，会直接
+    `AttributeError: 'NoneType' object has no attribute 'submit'`——跟
+    `proxy_pool.get_proxy_pool()` 是同一类坑。
+
+    用一个临时包住 `__getattribute__` 的技巧模拟真实的线程抢占：`download()`
+    第一次读 `self._pool` 时，**先正常拿到那个真实存在的池对象**，再暂停——
+    这模拟的是「读取已经完成、线程被切换出去」，而不是「读取本身被推迟」。
+    暂停期间让 `close()` 在另一侧把 `self._pool` 置 None，再放行。
+
+    如果 `download()` 用的是第一次读取时已经拿到手的那个引用（修复之后：
+    只读一次、存进局部变量），最终应该正常返回，不受并发 `close()` 影响；
+    如果它后面又独立重新读了一次 `self._pool`（修复之前的行为），这次
+    重读会读到 None，紧接着调用 `.submit()` 直接 `AttributeError`。
+    """
+    from netspy.network.downloader._playwright import PlaywrightDownloader
+
+    dl = PlaywrightDownloader({"pool_size": 1, "timeout": 5, "headless": True})
+    dl._pool = mock.Mock()  # type: ignore[assignment]
+    dl._pool.submit.return_value = Response(
+        url="http://example.com/x", status_code=200, content=b"ok"
+    )
+
+    paused = threading.Event()
+    proceed = threading.Event()
+    read_count = {"n": 0}
+    orig_getattribute = PlaywrightDownloader.__getattribute__
+
+    def patched_getattribute(self: Any, name: str) -> Any:
+        if name == "_pool" and self is dl:
+            read_count["n"] += 1
+            if read_count["n"] == 1:
+                # 先正常完成这次读取，拿到当前真实的池对象——
+                # 暂停的是「读到之后」，不是「读取本身」
+                value = orig_getattribute(self, name)
+                paused.set()
+                proceed.wait(timeout=2)
+                return value
+        return orig_getattribute(self, name)
+
+    result: dict[str, Any] = {}
+
+    def downloader_thread() -> None:
+        try:
+            result["response"] = dl.download(Request("http://example.com/x"))
+        except AttributeError as exc:
+            result["error"] = exc
+
+    PlaywrightDownloader.__getattribute__ = patched_getattribute  # type: ignore[method-assign]
+    try:
+        t1 = threading.Thread(target=downloader_thread)
+        t1.start()
+        assert paused.wait(timeout=2), "没能让 download() 卡在第一次读取 _pool 之后，测试前提不成立"
+
+        dl.close()  # 这里的 self._pool 读取是第二次，不会被暂停，直接看到并清空当前值
+
+        proceed.set()
+        t1.join(timeout=2)
+    finally:
+        PlaywrightDownloader.__getattribute__ = orig_getattribute  # type: ignore[method-assign]
+
+    assert "error" not in result, f"download() 崩了：{result.get('error')!r}"
+    assert result["response"].status_code == 200
 
 
 def test_wait_has_an_upper_bound(monkeypatch: pytest.MonkeyPatch) -> None:
