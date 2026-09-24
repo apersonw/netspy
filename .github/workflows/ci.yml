@@ -71,6 +71,13 @@ jobs:
       - run: pip install -e ".[dev]"
       - name: install chromium
         run: python -m playwright install --with-deps chromium
+      # patchright 是独立打包的 Playwright fork，钉的 chromium revision
+      # 跟 vanilla playwright 不是同一个（实测撞到过：1234 vs 1243）——
+      # 上面那条 playwright install 装的版本满足不了它，engine="patchright"
+      # 的用例会在全新环境里报「找不到浏览器可执行文件」。dev extra 里带了
+      # render-patchright，这一步补齐它自己需要的那份
+      - name: install patchright chromium
+        run: python -m patchright install --with-deps chromium
       - name: pytest
         # network 标记的用例要打外部指纹服务，放 CI 里会 flaky，本地手动跑
         env:
