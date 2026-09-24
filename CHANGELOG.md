@@ -3,6 +3,21 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.2] - 2026-09-24
+
+### 修复
+
+- `LOG_LEVEL` / `LOG_FILE` / `LOG_COLOR` / `LOG_ROTATION` / `LOG_RETENTION`
+  —— 不管是写在项目 `setting.py`、环境变量 `NETSPY_LOG_*`，还是 Spider 的
+  `__custom_setting__` 里，此前全部被静默忽略。根因：`get_logger()` 只在
+  第一次调用时按当时的 setting 建 loguru sink，而这个「第一次」几乎总发生
+  在 `import netspy` 的过程中——几十个模块在顶层 `log = get_logger("xxx")`，
+  那时项目配置文件 / 环境变量还没加载；之后 `reload()`（应用配置文件与
+  环境变量）和 `apply()`（`__custom_setting__`）只改了 `setting` 模块的
+  全局变量，不会让已经建好的 sink 跟着重建。`setting.LOG_LEVEL` 读出来是
+  配置对了的值，实际生效的还是默认值，且没有任何提示。现在
+  `reload()` / `apply()` 末尾都会重建日志 sink，三条配置路径一次修好。
+
 ## [1.3.1] - 2026-09-24
 
 ### 修复
