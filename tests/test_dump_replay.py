@@ -22,7 +22,7 @@ import pytest
 
 from netspy import UpdateItem, setting
 from netspy.buffer.item_buffer import ItemBuffer
-from netspy.commands.retry import retry_items
+from netspy.commands.retry import _rewrite, retry_items
 from netspy.dedup import Dedup
 from netspy.pipelines.base import BasePipeline
 from netspy.utils.stats import Stats
@@ -141,6 +141,41 @@ def test_old_dump_files_still_replay(monkeypatch: pytest.MonkeyPatch) -> None:
     assert retry_items() == (1, 0)
     assert RecordingPipeline.saved == [("t", [{"k": 1}])]
     assert RecordingPipeline.updated == []
+
+
+def test_rewrite_does_not_wipe_file_when_write_is_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归测试：写「仍失败」记录时半路被杀，原文件不能变空。
+
+    `failed_items.jsonl` 是这些记录**唯一的副本**。旧实现直接
+    `path.write_text(...)`——`open(path, "w")` 一上来就截断目标文件，
+    进程这时候被 OOM Killer / SIGKILL / 断电，文件已经空了，新内容却一个
+    字节都没落地：本该保留下来回放的记录就此永久消失。
+
+    用一个只在临时文件（`.part`）上抛异常的 monkeypatch 模拟"写到一半被杀"：
+    正确实现下原文件应该原封不动，因为改动只发生在临时文件上，
+    真正的替换要等临时文件完整写完才会原子发生。
+    """
+    target = tmp_path / "failed_items.jsonl"
+    target.write_text('{"table": "t", "data": {"k": "old"}}\n', encoding="utf-8")
+
+    real_write_text = Path.write_text
+
+    def _crash_on_temp_file(self: Path, data: str, **kw: Any) -> int:
+        if self.name.endswith(".part"):
+            raise KeyboardInterrupt("模拟写临时文件时进程被杀")
+        return real_write_text(self, data, **kw)
+
+    monkeypatch.setattr(Path, "write_text", _crash_on_temp_file)
+
+    with pytest.raises(KeyboardInterrupt):
+        _rewrite(target, [{"table": "t", "data": {"k": "new"}}])
+
+    assert target.exists(), "原文件不该被删掉"
+    assert '"old"' in target.read_text(encoding="utf-8"), (
+        "原文件的内容被破坏了——写临时文件失败不该影响到它"
+    )
 
 
 def test_pipeline_without_update_items_does_not_kill_the_replay(

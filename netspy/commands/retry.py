@@ -34,10 +34,20 @@ def _read_lines(path: Path) -> list[Any]:
 
 
 def _rewrite(path: Path, remaining: list[Any]) -> None:
-    if remaining:
-        path.write_text("\n".join(tools.dumps_json(r) for r in remaining) + "\n", encoding="utf-8")
-    elif path.exists():
-        path.unlink()
+    """回写仍失败的记录。**先写临时文件再改名**：这份文件是它们唯一的副本。
+
+    `Path.write_text()` 直接写目标文件的话，`open(path, "w")` 一上来就截断 ——
+    进程这时候被杀（OOM / SIGKILL / 断电），文件已经空了，新内容却一个字节
+    都没落地：本该保留的「仍失败」记录直接消失，无法回放。跟 `network/cache.py`
+    的 `store()` 是同一个坑、同一个修法。
+    """
+    if not remaining:
+        if path.exists():
+            path.unlink()
+        return
+    tmp = path.with_suffix(path.suffix + ".part")
+    tmp.write_text("\n".join(tools.dumps_json(r) for r in remaining) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def retry_items(path: str | None = None) -> tuple[int, int]:
