@@ -3,6 +3,51 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] - 2026-09-24
+
+### 新增
+
+- Playwright 渲染下载器新增四项可选的反检测能力，全部默认关闭、不改变现有用法：
+  - `WEBDRIVER["channel"]`（如 `"chrome"`）：用系统里真实安装的 Chrome 而不是
+    Playwright 自带的 Chromium，UA 版本号、TLS/HTTP2 指纹更贴近目标站预期的
+    「真实 Chrome」画像；启动时也无条件加上 `--disable-blink-features=
+    AutomationControlled`，关掉最直接的自动化标记
+  - `WEBDRIVER["locale"]` / `["timezone_id"]`：Playwright `new_context()`
+    原生支持的参数
+  - `WEBDRIVER["engine"] = "patchright"`：切换到打了 CDP 层探测点补丁的
+    Playwright fork（避免 `Runtime.enable` 等探测点），需要
+    `pip install netspy[render-patchright]`；只支持 chromium，配
+    firefox/webkit 会在构造期直接报错，不会等到真正渲染时才发现配错了
+  - `WEBDRIVER["user_data_dir"]`：持久化浏览器 profile，跨次运行保留
+    cookies / localStorage，`pool_size` 个渲染线程各用一个子目录
+  - `netspy.network.downloader._humanize`：`human_move` / `human_click` /
+    `human_type` / `human_scroll` 四个工具函数，模拟真人的鼠标移动 / 点击 /
+    逐字符输入 / 分段滚动，供 `render_script` 里按需调用（不自动生效）
+
+### 修复
+
+- 补上多处「创建 / 获取资源时用了锁，对应的关闭 / 清理函数却没有」的并发
+  缺陷：`MemoryBatchStore`（`mark_task` / `reset_lost_tasks` 等方法）、
+  `db.close_redis()`、下载器的 `ProxyClientCache.drain()` /
+  `close_default_downloaders()`、`proxy_pool.close_proxy_pool()`、
+  `PlaywrightDownloader.close()`。调度器停工作线程用的是**有超时的**
+  `join()`，慢任务的 worker 完全可能在对应资源关闭时还在跑——不加锁轻则
+  崩溃（`RuntimeError: dictionary changed size during iteration`），重则
+  静默返回错误状态（`proxy_pool` 这处最隐蔽：`PROXY_ENABLE=True` 时可能
+  悄悄返回 `None`，调用方误判成「没开代理池」直接暴露源 IP，比崩溃更难查）。
+  全部修复都用强制交叉调度复现 + 变异测试验证过，不是理论推测。
+- `BatchSpider.update_task()` 判断「数据还在不在缓冲里」和「登记落库后回调」
+  原来是两次独立加锁的调用，中间有个没锁保护的窗口——`ItemBuffer.flush()`
+  恰好插在这个窗口里跑完的话，任务永远标不上「完成」，卡在「处理中」直到
+  租约超时才被重新捞回来重跑一遍。`ItemBuffer` 新增
+  `after_persist_if_pending()`，把两步锁进同一个临界区。
+- `get_logger()` 首次懒初始化没加锁，多线程同时触发第一次调用（比如同一
+  进程跑了不止一个 Spider）会导致日志 sink 重复注册，每行日志打印两遍。
+- `NETSPY_SETTING` 环境变量指定的配置文件路径不存在时原来完全静默——跟
+  「压根没设置这个变量」是同一种沉默，配置整个没生效却毫无提示。现在区分
+  两种情况：默认候选路径找不到保持沉默（合法用法），显式指定的路径找不到
+  会警告一次。
+
 ## [1.2.0] - 2026-09-22
 
 ### 修复
