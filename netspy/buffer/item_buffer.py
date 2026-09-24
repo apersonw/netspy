@@ -148,13 +148,20 @@ class ItemBuffer(threading.Thread):
         self._stop_event.set()
 
     def close(self) -> None:
-        for pipelines in self._pipeline_cache.values():
+        # 加锁快照再清空：跟 `_resolve_pipelines()` 共用同一份 `_pipeline_cache`。
+        # 调度器停工作线程用的是**有超时的** join()，慢请求的 worker 完全可能
+        # 在这一步还在跑，这时 `_resolve_pipelines()` 正持锁往缓存里插新键 ——
+        # 没锁的话这里会在没有保护的情况下遍历同一个 dict，`RuntimeError:
+        # dictionary changed size during iteration` 说崩就崩。
+        with self._lock:
+            pipeline_lists = list(self._pipeline_cache.values())
+            self._pipeline_cache.clear()
+        for pipelines in pipeline_lists:
             for pipeline in pipelines:
                 try:
                     pipeline.close()
                 except Exception:
                     log.exception("管道 {} close 异常", type(pipeline).__name__)
-        self._pipeline_cache.clear()
 
     # ------------------------------------------------------------------
     def flush(self) -> None:
@@ -267,6 +274,19 @@ class ItemBuffer(threading.Thread):
         return self._dedup
 
     def _resolve_pipelines(self, paths: tuple[str, ...] | None) -> list[BasePipeline]:
+        """按路径元组取（或建）管道实例列表，带缓存。
+
+        原来是无锁的「查 → 建 → 存」：`flush()` 能从多个线程并发触发
+        （`put()` 攒够 `ITEM_MAX_CACHED_COUNT` 时在调用方线程上同步 flush，
+        多个 worker 同时攒够的话就是多个线程各跑各的 `flush()`）。缓存刚冷
+        启动时（还没缓存过这个 key），两个线程会各建一份管道 —— 实测两个
+        线程并发各建了一次。构造管道可能是开数据库连接池这种有实际开销的
+        操作，输的那份既不会被用来写数据，也不在最终的 `_pipeline_cache`
+        里，`close()` 找不到它，连接就那样泄漏到进程退出。
+
+        锁内构造把它串行化：这跟 `ProxyClientCache.get_or_create()`
+        是同一类问题、同一个修法 —— 一次性成本，只在缓存冷的时候付。
+        """
         key = (
             paths
             if paths is not None
@@ -274,11 +294,12 @@ class ItemBuffer(threading.Thread):
                 self._pipeline_paths if self._pipeline_paths is not None else setting.ITEM_PIPELINES
             )
         )
-        cached = self._pipeline_cache.get(key)
-        if cached is None:
-            cached = [tools.load_object(path)() for path in key]
-            self._pipeline_cache[key] = cached
-        return cached
+        with self._lock:
+            cached = self._pipeline_cache.get(key)
+            if cached is None:
+                cached = [tools.load_object(path)() for path in key]
+                self._pipeline_cache[key] = cached
+            return cached
 
     def _write(
         self,

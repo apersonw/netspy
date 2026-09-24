@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +131,57 @@ def test_handler_bypasses_pipelines_and_dedup() -> None:
     buf.flush()
     assert len(got) == 2
     assert not RecordingPipeline.saved
+
+
+def test_resolve_pipelines_does_not_double_construct_under_concurrent_flush(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归测试：缓存冷启动时并发 `flush()` 不该把同一份管道建两遍。
+
+    `flush()` 能从多个线程并发触发——`put()` 攒够 `ITEM_MAX_CACHED_COUNT`
+    时在调用方线程上同步 flush，多个 worker 同时攒够的话就是多个线程各跑
+    各的 `flush()`。旧实现的 `_resolve_pipelines()` 是无锁的「查 → 建 →
+    存」：缓存还没命中过这个 key 时，两个线程会各建一份管道实例——构造管道
+    可能是开数据库连接池这种有实际开销的操作，输的那份既不会被用来写
+    数据，也不在最终的缓存里，`close()` 找不到它，连接就那样泄漏。
+
+    用 `Barrier(2)` 强制两个线程的构造过程真正重叠，断言构造只发生一次。
+    """
+    construct_count = {"n": 0}
+    count_lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    class SlowPipeline(BasePipeline):
+        def __init__(self) -> None:
+            with count_lock:
+                construct_count["n"] += 1
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait(timeout=2)
+
+        def save_items(self, table: str, items: list[dict[str, Any]]) -> bool:
+            return True
+
+    monkeypatch.setattr("netspy.utils.tools.load_object", lambda path: SlowPipeline, raising=True)
+
+    buf = _buffer(pipelines=["fake.path.SlowPipeline"])
+
+    results: list[list[Any]] = []
+    results_lock = threading.Lock()
+
+    def worker() -> None:
+        pipelines = buf._resolve_pipelines(None)
+        with results_lock:
+            results.append(pipelines)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert construct_count["n"] == 1, f"管道被构造了 {construct_count['n']} 次，应为 1"
+    assert len(results) == 2
+    assert results[0] is results[1], "两个线程应该拿到同一份缓存的管道实例"
 
 
 def test_item_filter_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
