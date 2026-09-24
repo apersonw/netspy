@@ -42,28 +42,47 @@ class LocalUserPool(UserPool):
         self._blocked: dict[str, float] = {}
         self._idx = 0
         self._lock = threading.Lock()
+        #: 每个账号一把登录锁，懒创建。`login()` 通常是一次网络请求，
+        #: 绝不能拿主锁 `self._lock` 裹住它 —— 那会让所有线程排成一队去登同一个
+        #: 账号池，哪怕它们各自要的是不同账号。锁粒度按用户名拆开：不同账号的
+        #: 登录能真正并行，同一个账号被并发拿到时仍然只登录一次（内层双重检查）。
+        self._login_locks: dict[str, threading.Lock] = {}
 
     def add_user(self, user: User | dict[str, Any]) -> None:
         with self._lock:
             self._users.append(_coerce_user(user))
 
+    def _login_lock(self, username: str) -> threading.Lock:
+        with self._lock:
+            lock = self._login_locks.get(username)
+            if lock is None:
+                lock = threading.Lock()
+                self._login_locks[username] = lock
+            return lock
+
     def get(self) -> User | None:
         now = time.monotonic()
         with self._lock:
             total = len(self._users)
-            for _ in range(total):
+        for _ in range(total):
+            with self._lock:
                 user = self._users[self._idx % total]
                 self._idx += 1
                 if self._blocked.get(user.username, 0.0) > now:
                     continue
-                if not user.cookies and self._login is not None:
-                    try:
-                        user.cookies = dict(self._login(user) or {})
-                    except Exception:
-                        log.exception("登录失败：{}", user.username)
-                        self._blocked[user.username] = now + 300
-                        continue
+            if user.cookies or self._login is None:
                 return user
+            with self._login_lock(user.username):
+                if user.cookies:  # 等锁的时候被别的线程登录过了，直接复用
+                    return user
+                try:
+                    user.cookies = dict(self._login(user) or {})
+                except Exception:
+                    log.exception("登录失败：{}", user.username)
+                    with self._lock:
+                        self._blocked[user.username] = time.monotonic() + 300
+                    continue
+            return user
         return None
 
     def report_ok(self, user: User) -> None:

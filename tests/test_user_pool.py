@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -58,6 +60,90 @@ def test_local_pool_login_failure_cools_down() -> None:
 
     pool = LocalUserPool([{"username": "a"}], login=bad_login)
     assert pool.get() is None
+
+
+def test_local_pool_logins_for_different_users_run_concurrently() -> None:
+    """回归测试：不同账号的 `login()` 必须能真正并行，不能被一把全局锁串成队列。
+
+    `login()` 通常是一次网络请求（可能几百毫秒到几秒）。旧实现把它整个包在
+    `self._lock` 里——`get()` 变成了「谁在登录，其他所有线程（不管要哪个账号）
+    都得干等」，`SPIDER_THREAD_COUNT` 开得再高，账号池这一环也会退化成串行。
+
+    用 `Barrier(2)` 强制验证：两个线程各请求一个不同的、都需要登录的账号，
+    只要两边的 `login()` 真的同时在跑，barrier 就会在超时前被撞开；
+    退回旧的串行实现，第二个线程的 `login()` 要等第一个整个 `get()` 调用
+    （含锁）结束才会开始，barrier 必然超时。
+    """
+    barrier = threading.Barrier(2)
+    entered: set[str] = set()
+    entered_lock = threading.Lock()
+
+    def login(user: User) -> dict[str, str]:
+        with entered_lock:
+            entered.add(user.username)
+        barrier.wait(timeout=2.0)  # 两边没同时进来就会超时抛 BrokenBarrierError
+        return {"sid": f"tok-{user.username}"}
+
+    pool = LocalUserPool(
+        [{"username": "a"}, {"username": "b"}],
+        login=login,
+    )
+
+    results: dict[str, User | None] = {}
+
+    def worker(key: str) -> None:
+        results[key] = pool.get()
+
+    t1 = threading.Thread(target=worker, args=("a",))
+    t2 = threading.Thread(target=worker, args=("b",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert entered == {"a", "b"}
+    assert results["a"] is not None and results["a"].cookies == {"sid": "tok-a"}
+    assert results["b"] is not None and results["b"].cookies == {"sid": "tok-b"}
+
+
+def test_local_pool_concurrent_get_for_same_user_logs_in_once() -> None:
+    """回归测试：按用户名拆锁之后，同一个账号被并发拿到时仍然只登录一次。
+
+    这是把 `login()` 挪出全局锁之后要守住的不变量——挪出去意味着两个线程可能
+    同时选中同一个账号（比如账号池只有一个号），如果不额外按用户名加锁去重，
+    会出现重复登录、cookie 互相覆盖。
+    """
+    login_calls: list[str] = []
+    calls_lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def login(user: User) -> dict[str, str]:
+        with calls_lock:
+            login_calls.append(user.username)
+        with contextlib.suppress(threading.BrokenBarrierError):
+            barrier.wait(timeout=0.3)
+        time.sleep(0.05)
+        return {"sid": "shared-token"}
+
+    pool = LocalUserPool([{"username": "solo"}], login=login)
+
+    results: list[User | None] = []
+    results_lock = threading.Lock()
+
+    def worker() -> None:
+        user = pool.get()
+        with results_lock:
+            results.append(user)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert login_calls == ["solo"]
+    assert len(results) == 2
+    assert all(u is not None and u.cookies == {"sid": "shared-token"} for u in results)
 
 
 # ---------------------------------------------------------------- GuestUserPool
