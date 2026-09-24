@@ -502,6 +502,28 @@ def _apply_env() -> None:
             warnings.warn(f"环境变量 {env_key} 解析失败：{exc!r}", stacklevel=3)
 
 
+def _reconfigure_log() -> None:
+    """配置改完之后顺手让日志按新值重建 sink。
+
+    `utils.log.get_logger()` 只在**第一次**调用时按当时的 setting 配置；
+    这个「第一次」几乎总是发生在 `import netspy` 的过程中 —— 一堆模块在
+    顶层 `log = get_logger("xxx")`，而那时 `reload()` / `apply()` 还没跑，
+    setting 还是框架默认值。日志一旦配置好就标记为「已配置」，后面
+    `reload()`（应用项目 setting.py / 环境变量）和 `apply()`（Spider 的
+    ``__custom_setting__``）单纯改 setting 模块的全局变量，不会让已经建好
+    的 loguru sink 跟着重建 —— `LOG_LEVEL` / `LOG_FILE` 等配置因此被静默
+    忽略：`setting.LOG_LEVEL` 读出来是用户配的值，实际生效的还是默认值。
+
+    延迟 import 是因为 `utils.log` 反过来 `from netspy import setting`——
+    放到模块顶层就是循环导入；调用期再导入没有这个问题，且
+    `configure()` 本身很便宜（loguru 的 `remove()` + `add()`），无条件重建
+    不值得为了「是不是真的改了 LOG_ 开头的键」去多写一层判断。
+    """
+    from netspy.utils.log import configure
+
+    configure()
+
+
 def reload() -> None:
     """重置为默认值，再依次应用项目配置文件与环境变量。"""
     _apply({name: copy.deepcopy(value) for name, value in _DEFAULTS.items()})
@@ -509,6 +531,7 @@ def reload() -> None:
     _warn_near_miss(project, "项目配置文件")
     _apply(project)
     _apply_env()
+    _reconfigure_log()
 
 
 def apply(mapping: dict[str, Any]) -> None:
@@ -516,6 +539,7 @@ def apply(mapping: dict[str, Any]) -> None:
     filtered = {k: v for k, v in mapping.items() if k.isupper() and not k.startswith("_")}
     _warn_near_miss(filtered, "__custom_setting__")
     _apply(filtered)
+    _reconfigure_log()
 
 
 def as_dict() -> dict[str, Any]:
