@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 import httpx
 import pytest
 import respx
@@ -60,6 +63,44 @@ def test_first_fetch_not_suppressed_by_interval(monkeypatch: pytest.MonkeyPatch)
 
     pool.get_proxy()  # 已经抓过，间隔内不该再打接口
     assert route.call_count == 1
+
+
+@respx.mock
+def test_report_bad_does_not_wait_for_unrelated_fetch() -> None:
+    """回归测试：`_fetch()` 拉取列表期间，不该拿主锁卡住无关的 `report_bad()`。
+
+    旧实现把 `httpx.get()` 整段包在 `self._lock` 里——池空时一个线程触发拉取，
+    另一个线程哪怕只是想给一个跟这次拉取毫不相干的代理记一笔失败，也得先陪
+    着干等整个网络往返。实测跟拉取无关的 `report_bad()` 被拖了整整一次拉取
+    耗时。用一个人为放慢的响应制造这个窗口：拉取真正开始后再调
+    `report_bad()`，旧实现下它要等拉取结束才返回，新实现应该几乎立即返回。
+    """
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+
+    def _slow(request: httpx.Request) -> httpx.Response:
+        fetch_started.set()
+        assert release_fetch.wait(timeout=2), "拉取没能被外部按预期放行"
+        return httpx.Response(200, text="1.1.1.1:80")
+
+    respx.get("https://slow/list").mock(side_effect=_slow)
+    pool = ApiProxyPool("https://slow/list")
+
+    def fetcher() -> None:
+        pool.get_proxy()  # 池是空的，会触发 _fetch()
+
+    t = threading.Thread(target=fetcher)
+    t.start()
+    assert fetch_started.wait(timeout=2), "没能让拉取真正开始，测试前提不成立"
+
+    start = time.monotonic()
+    pool.report_bad("http://9.9.9.9:80")  # 跟这次拉取完全无关的一次报告
+    elapsed = time.monotonic() - start
+
+    release_fetch.set()
+    t.join(timeout=2)
+
+    assert elapsed < 0.5, f"report_bad() 花了 {elapsed:.2f}s —— 被无关的拉取卡住了"
 
 
 @respx.mock

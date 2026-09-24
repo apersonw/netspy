@@ -31,6 +31,13 @@ class ApiProxyPool(ProxyPool):
     def __init__(self, api: str | None = None) -> None:
         self._api = api or setting.PROXY_EXTRACT_API
         self._lock = threading.Lock()
+        #: 拉取时持有，`self._lock` 不持有 —— 拉取是一次 HTTP 请求（最长
+        #: PROXY_MIN_INTERVAL 允许的等待之外还有 httpx 自己的 10s 超时）。
+        #: 拿主锁裹住它的话，另一个线程哪怕只是想 report_bad() 一个跟这次拉取
+        #: 毫不相干的代理，也得先干等这次拉取的整个网络往返 —— 实测跟拉取
+        #: 完全无关的 report_bad() 被拖了整整一次拉取耗时（1.0s）。
+        #: 这把独立的锁只用来防止多个线程同时打供应商接口（穿透 PROXY_MIN_INTERVAL）。
+        self._fetch_lock = threading.Lock()
         self._pool: deque[str] = deque()
         self._use_count: dict[str, int] = {}
         # 代理 -> 解禁时刻（monotonic）。原来这里是个只进不出的 set，
@@ -83,25 +90,38 @@ class ApiProxyPool(ProxyPool):
                 del self._use_count[key]
 
     def _fetch(self) -> None:
+        """拉取新代理。**只在 `_fetch_lock` 内部持有 `self._lock`，且不横跨 HTTP 请求**：
+
+        真正的网络往返（`httpx.get`）发生在两段锁之间 —— 这样另一个线程调
+        `get_proxy()` / `report_bad()` 等只碰内存状态的操作，不会被这次拉取
+        卡住。`_fetch_lock` 本身则保证同一时刻只有一个线程在打供应商接口，
+        且 `PROXY_MIN_INTERVAL` 的判断在它内部做，不会被并发穿透。
+        """
         if not self._api:
             return
-        now = time.monotonic()
-        if self._last_fetch is not None and now - self._last_fetch < setting.PROXY_MIN_INTERVAL:
-            return
-        self._last_fetch = now
-        # 先回收再补充：用满次数被丢出池的代理，计数在这里清零，
-        # 补回来之后才是「轮换」而不是「只能再用一次」
-        self._prune(now)
-        try:
-            body = httpx.get(self._api, timeout=10).text.strip()
-        except httpx.HTTPError as exc:
-            log.error("拉取代理失败：{!r}", exc)
-            return
-        proxies = self._parse(body)
-        for proxy in proxies:
-            if not self._is_banned(proxy, now) and proxy not in self._pool:
-                self._pool.append(proxy)
-        log.debug("代理池补充 {} 个，当前 {}", len(proxies), len(self._pool))
+        with self._fetch_lock:
+            with self._lock:
+                now = time.monotonic()
+                if (
+                    self._last_fetch is not None
+                    and now - self._last_fetch < setting.PROXY_MIN_INTERVAL
+                ):
+                    return
+                self._last_fetch = now
+                # 先回收再补充：用满次数被丢出池的代理，计数在这里清零，
+                # 补回来之后才是「轮换」而不是「只能再用一次」
+                self._prune(now)
+            try:
+                body = httpx.get(self._api, timeout=10).text.strip()
+            except httpx.HTTPError as exc:
+                log.error("拉取代理失败：{!r}", exc)
+                return
+            proxies = self._parse(body)
+            with self._lock:
+                for proxy in proxies:
+                    if not self._is_banned(proxy, time.monotonic()) and proxy not in self._pool:
+                        self._pool.append(proxy)
+                log.debug("代理池补充 {} 个，当前 {}", len(proxies), len(self._pool))
 
     @staticmethod
     def _parse(body: str) -> list[str]:
@@ -118,8 +138,12 @@ class ApiProxyPool(ProxyPool):
     # ------------------------------------------------------------------
     def get_proxy(self) -> str | None:
         with self._lock:
-            if not self._pool:
-                self._fetch()
+            empty = not self._pool
+        if empty:
+            # 在锁外面拉取：见 `_fetch` 的说明。拉取期间别的线程该干嘛干嘛，
+            # 不会被这次可能耗时数秒的 HTTP 请求卡住
+            self._fetch()
+        with self._lock:
             for _ in range(len(self._pool)):
                 proxy = self._pool[0]
                 self._pool.rotate(-1)  # 轮转到队尾
