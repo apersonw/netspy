@@ -368,6 +368,19 @@ WEBDRIVER: dict[str, Any] = {
     "proxy": None,  # http://user:pass@host:port
     "stealth": True,  # 注入基础反检测脚本
     "viewport": [1920, 1080],
+    # 系统里真实安装的 Chrome 通道（如 "chrome"），而不是 Playwright 自带的那份
+    # Chromium——UA 版本号、TLS/HTTP2 指纹会更贴近目标站预期的"真实 Chrome"画像。
+    # None = 用 Playwright 自带的 Chromium（默认，免额外安装）
+    "channel": None,
+    "locale": None,  # 如 "zh-CN"；透传给 new_context()，Playwright 原生支持，不用注入 JS
+    "timezone_id": None,  # 如 "Asia/Shanghai"；同上
+    # 引擎：playwright（默认）| patchright（CDP 层补丁，需 pip install
+    # netspy[render-patchright]；只支持 chromium，配 firefox/webkit 会直接报错）
+    "engine": "playwright",
+    # 持久化 profile 目录；设置后浏览器带着上次的 cookies / localStorage / 历史
+    # 重新启动，而不是每次全新指纹。pool_size > 1 时每个渲染线程各用一个子目录
+    # （Chrome 不允许多进程共享同一份 profile）。None = 保持现状的临时 profile
+    "user_data_dir": None,
 }
 
 # ---- 调试 ----

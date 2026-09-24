@@ -5,6 +5,10 @@
 并发浏览器上限；小于 ``SPIDER_THREAD_COUNT`` 时天然形成背压。
 
 需要 ``pip install netspy[render] && playwright install chromium``。
+
+``WEBDRIVER["engine"] = "patchright"`` 可选切换到 patchright（CDP 层补丁，避免用
+``Runtime.enable`` 等探测点，需 ``pip install netspy[render-patchright]``）；只支持
+chromium，配 firefox/webkit 会在构造期直接报错。
 """
 
 from __future__ import annotations
@@ -12,10 +16,11 @@ from __future__ import annotations
 import queue
 import threading
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from netspy import setting
-from netspy.exceptions import RequestError
+from netspy.exceptions import ConfigError, RequestError
 from netspy.network.downloader._common import check_size
 from netspy.network.downloader.base import Downloader
 from netspy.network.response import Response
@@ -60,6 +65,27 @@ def _stealth_script() -> str:
 _WAIT_MARGIN = 30.0
 
 
+def _import_sync_playwright(engine: str) -> Any:
+    """按 `engine` 取 `sync_playwright`——playwright（默认）或 patchright。
+
+    patchright 是打了 CDP 层探测点补丁的 Playwright fork（避免用
+    `Runtime.enable`、去掉 `--enable-automation` 等默认参数），API 跟
+    Playwright 完全一致，只是换了顶层包名。只支持 chromium 这一点在
+    `PlaywrightDownloader.__init__` 里已经校验过，这里不用重复判断。
+    """
+    if engine == "patchright":
+        try:
+            from patchright.sync_api import sync_playwright as patchright_sync_playwright
+        except ImportError as exc:  # pragma: no cover - 可选依赖
+            raise ImportError(
+                'engine="patchright" 需要 pip install "netspy[render-patchright]"'
+            ) from exc
+        return patchright_sync_playwright
+    from playwright.sync_api import sync_playwright
+
+    return sync_playwright
+
+
 class _Job:
     __slots__ = ("error", "event", "request", "response")
 
@@ -84,6 +110,9 @@ class _Job:
 class _RenderWorker(threading.Thread):
     def __init__(self, index: int, jobs: queue.Queue[_Job | None], config: dict[str, Any]) -> None:
         super().__init__(name=f"render-{index}", daemon=True)
+        #: persistent profile 模式下用来拼每个线程独立的子目录——
+        #: Chrome 不允许多进程 / 多实例共享同一份 profile
+        self._index = index
         self._jobs = jobs
         self._config = config
         self._stop_event = threading.Event()
@@ -115,17 +144,31 @@ class _RenderWorker(threading.Thread):
             self._teardown()
 
     def _ensure_browser(self) -> None:
-        if self._browser is not None:
+        # ⚠️ 判「已经初始化过」不能看 self._browser：persistent profile 模式下
+        # 根本不会有独立的 browser 对象（launch_persistent_context 直接给
+        # context），self._browser 永远是 None——用它当判据的话，
+        # _ensure_browser 会在每个任务上都重新跑一遍，等于每个请求重开一次浏览器
+        if self._context is not None:
             return
-        from playwright.sync_api import sync_playwright
+        sync_playwright = _import_sync_playwright(self._config.get("engine", "playwright"))
 
         cfg = self._config
         self._pw = sync_playwright().start()
         browser_type = getattr(self._pw, cfg.get("browser", "chromium"))
-        launch_kwargs: dict[str, Any] = {"headless": cfg["headless"]}
+        launch_kwargs: dict[str, Any] = {
+            "headless": cfg["headless"],
+            # 关掉「这是自动化」这条最直接的信号（Blink 的 AutomationControlled
+            # 特性会让 navigator.webdriver 之类的属性走跟正常启动不同的代码路径）。
+            # 无条件加：对正常渲染没有任何副作用，纯收益
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
         if cfg.get("proxy"):
             launch_kwargs["proxy"] = {"server": cfg["proxy"]}
-        self._browser = browser_type.launch(**launch_kwargs)
+        channel = cfg.get("channel")
+        if channel:
+            # 用系统里真实安装的 Chrome 而不是 Playwright 自带的 Chromium——
+            # UA 版本号、TLS/HTTP2 指纹更贴近目标站预期的「真实 Chrome」画像
+            launch_kwargs["channel"] = channel
 
         ua = cfg.get("user_agent")
         if not ua and setting.RANDOM_USER_AGENT:
@@ -136,7 +179,27 @@ class _RenderWorker(threading.Thread):
         viewport = cfg.get("viewport")
         if viewport:
             ctx_kwargs["viewport"] = {"width": viewport[0], "height": viewport[1]}
-        self._context = self._browser.new_context(**ctx_kwargs)
+        locale = cfg.get("locale")
+        if locale:
+            ctx_kwargs["locale"] = locale
+        timezone_id = cfg.get("timezone_id")
+        if timezone_id:
+            ctx_kwargs["timezone_id"] = timezone_id
+
+        user_data_dir = cfg.get("user_data_dir")
+        if user_data_dir:
+            # 持久化 profile：带着上次的 cookies / localStorage / 历史重新启动，
+            # 而不是每次全新指纹。每个渲染线程独立一份子目录——见 __init__ 里
+            # self._index 的注释。launch_persistent_context 直接返回 context，
+            # 没有独立的 browser 句柄，self._browser 保持 None（_teardown 本来
+            # 就会跳过它）
+            profile_dir = str(Path(user_data_dir) / str(self._index))
+            self._context = browser_type.launch_persistent_context(
+                profile_dir, **launch_kwargs, **ctx_kwargs
+            )
+        else:
+            self._browser = browser_type.launch(**launch_kwargs)
+            self._context = self._browser.new_context(**ctx_kwargs)
 
         if not cfg.get("load_images", False):
             self._context.route("**/*", _maybe_block)
@@ -283,6 +346,16 @@ class _RenderPool:
 class PlaywrightDownloader(Downloader):
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = {**setting.WEBDRIVER, **(config or {})}
+        # 在构造期就校验，而不是等第一个渲染任务才发现——patchright 只打了
+        # chromium 的补丁，配 firefox/webkit 会在第一次真正启动浏览器时才
+        # 冒出一个跟"引擎选错了"完全无关的错误，不如现在直接说清楚
+        engine = self._config.get("engine", "playwright")
+        browser = self._config.get("browser", "chromium")
+        if engine == "patchright" and browser != "chromium":
+            raise ConfigError(
+                f'engine="patchright" 只支持 chromium，当前 browser={browser!r}。'
+                "把 browser 改成 chromium，或者把 engine 改回 playwright"
+            )
         self._pool: _RenderPool | None = None
         self._lock = threading.Lock()
 

@@ -40,6 +40,9 @@ Issues = "https://github.com/apersonw/netspy/issues"
 
 [project.optional-dependencies]
 render = ["playwright>=1.44", "playwright-stealth>=2.0"]
+# CDP 层补丁（Runtime.enable / Console.enable 探测点），只支持 chromium。
+# 独立 extra，不进 render/all——是否要多装这一个包由用户自己决定
+render-patchright = ["patchright>=1.40"]
 mongo = ["pymongo>=4.7"]
 mysql = ["pymysql>=1.1", "dbutils>=3.0"]
 redis = ["redis>=5.0"]
@@ -52,6 +55,9 @@ kafka = ["kafka-python>=2.0"]
 all = ["netspy[render,mongo,mysql,postgres,elasticsearch,kafka,redis,cli,metrics,curl]"]
 dev = [
     "netspy[all]",
+    # engine="patchright" 不进 all（用户端要不要多装这个由自己决定），
+    # 但项目自己的测试要覆盖到这条路径，否则悄悄坏掉也没人发现
+    "netspy[render-patchright]",
     "pytest>=8",
     "pytest-cov>=5",
     "respx>=0.21",
