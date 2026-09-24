@@ -24,13 +24,26 @@ log = get_logger("retry")
 
 
 def _read_lines(path: Path) -> list[Any]:
+    """逐行解析 dump 文件，**单条解不出来不该拖累整个文件**。
+
+    dump 是追加写的（见 `base_scheduler._append_requests` /
+    `item_buffer._dump_failed`），进程如果正好在追加中途被杀
+    （OOM / SIGKILL / 断电），最后一行会是半截 JSON —— 这条本来就救不回来，
+    但不能让它连累前面已经完整落盘的记录跟着读不出来。
+    `base_scheduler._replay_failed_requests()`（爬虫启动时的自动回放）
+    早就是这么处理的，CLI 这条路径原来漏了同一防御。
+    """
     if not path.is_file():
         return []
-    return [
-        tools.loads_json(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    records: list[Any] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(tools.loads_json(line))
+        except Exception:
+            log.warning("有一行记录解析不了（可能是写到一半被中断），跳过：{}", line[:120])
+    return records
 
 
 def _rewrite(path: Path, remaining: list[Any]) -> None:

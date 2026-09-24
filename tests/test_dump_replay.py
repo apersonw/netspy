@@ -143,6 +143,30 @@ def test_old_dump_files_still_replay(monkeypatch: pytest.MonkeyPatch) -> None:
     assert RecordingPipeline.updated == []
 
 
+def test_corrupted_trailing_line_does_not_block_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归测试：一行解析不了，不该拖累文件里其它完好的记录。
+
+    dump 文件是追加写的，进程如果正好在追加中途被杀，最后一行会是半截
+    JSON——这条本来就救不回来，但旧实现一遇到它就让 `json.JSONDecodeError`
+    直接穿出 `retry_items()`：前面两条完好的记录跟着一起读不出来，
+    `netspy retry --items` 对着一个大部分完好的文件直接报错退出。
+    `base_scheduler._replay_failed_requests()`（爬虫启动时的自动回放）早就
+    对同一种损坏做了逐行跳过，这里该是同一个防御。
+    """
+    Path(setting.FAILED_ITEM_PATH).write_text(
+        json.dumps({"table": "t", "data": {"k": 1}})
+        + "\n"
+        + json.dumps({"table": "t", "data": {"k": 2}})
+        + "\n"
+        + '{"table": "t", "data": {"k": "trunc',  # 半截 JSON，没有结尾
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(setting, "ITEM_PIPELINES", [_RECORD])
+    assert retry_items() == (2, 0), "两条完好的记录应该正常回放，不该被截断的那行拖累"
+    saved_rows = [r for _, rows in RecordingPipeline.saved for r in rows]
+    assert saved_rows == [{"k": 1}, {"k": 2}]
+
+
 def test_rewrite_does_not_wipe_file_when_write_is_interrupted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
