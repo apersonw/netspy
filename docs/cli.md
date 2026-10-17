@@ -26,7 +26,7 @@ netspy shell https://example.com
 netspy shell https://spa.example.com --render
 ```
 
-抓一个页面进交互式 shell，绑定 `request` / `response` / `mw`。装了 IPython 用 IPython，
+抓一个页面进交互式 shell，绑定 `request` / `response` / `ns`。装了 IPython 用 IPython，
 否则用内置 REPL（带 tab 补全）。
 
 ## retry

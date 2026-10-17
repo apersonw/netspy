@@ -104,7 +104,7 @@ def _common_setting(mysql_url: str, redis_url: str) -> None:
 
 
 def _worker(base: str, mysql_url: str, redis_url: str, key: str) -> None:
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.core.batch_store import MysqlBatchStore
     from netspy.core.spiders.batch_spider import BatchSpider
@@ -113,7 +113,7 @@ def _worker(base: str, mysql_url: str, redis_url: str, key: str) -> None:
     _common_setting(mysql_url, redis_url)
     setting.ITEM_PIPELINES = ["netspy.pipelines.mysql.MysqlPipeline"]
 
-    class Row(mw.Item):
+    class Row(ns.Item):
         __table_name__ = DATA_TABLE
         __unique_key__ = ["url"]
         url: str = ""
@@ -121,7 +121,7 @@ def _worker(base: str, mysql_url: str, redis_url: str, key: str) -> None:
 
     class Node(BatchSpider):
         def task_requests(self, task: dict[str, Any]) -> Any:
-            yield mw.Request(_task_url(base, task["id"]), callback=self.parse)
+            yield ns.Request(_task_url(base, task["id"]), callback=self.parse)
 
         def parse(self, request: Any, response: Any, task: Any = None) -> Any:
             title = response.css("h1.t::text").get()
@@ -137,7 +137,7 @@ def _worker(base: str, mysql_url: str, redis_url: str, key: str) -> None:
 
 
 def _master(base: str, mysql_url: str, redis_url: str, key: str) -> None:
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.core.batch_store import MysqlBatchStore
     from netspy.core.spiders.batch_spider import BatchSpider
@@ -148,7 +148,7 @@ def _master(base: str, mysql_url: str, redis_url: str, key: str) -> None:
 
     class Node(BatchSpider):
         def task_requests(self, task: dict[str, Any]) -> Any:
-            yield mw.Request(_task_url(base, task["id"]), callback=self.parse)
+            yield ns.Request(_task_url(base, task["id"]), callback=self.parse)
 
         def parse(self, request: Any, response: Any, task: Any = None) -> Any:
             return None

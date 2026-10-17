@@ -34,12 +34,12 @@ cd news_crawler && python main.py
 或直接写：
 
 ```python
-import netspy as mw
+import netspy as ns
 
 
-class NewsSpider(mw.AirSpider):
+class NewsSpider(ns.AirSpider):
     def start_requests(self):
-        yield mw.Request("https://news.ycombinator.com/", callback=self.parse)
+        yield ns.Request("https://news.ycombinator.com/", callback=self.parse)
 
     def parse(self, request, response):
         for a in response.css("span.titleline > a"):

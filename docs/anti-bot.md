@@ -41,8 +41,8 @@ DOWNLOADER_IMPERSONATE = "chrome"        # 空串 = 关闭（默认）
 按请求覆盖：
 
 ```python
-yield mw.Request(url, impersonate="safari17_0")
-yield mw.Request(url, impersonate="")        # 这一条不伪装
+yield ns.Request(url, impersonate="safari17_0")
+yield ns.Request(url, impersonate="")        # 这一条不伪装
 ```
 
 !!! warning "别再叠加随机 UA"

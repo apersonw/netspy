@@ -6,7 +6,7 @@
 
     from netspy.network.downloader._humanize import human_click, human_scroll
 
-    yield mw.Request(url, render=True, render_script=lambda page: (
+    yield ns.Request(url, render=True, render_script=lambda page: (
         human_scroll(page),
         human_click(page, "button.load-more"),
     ), callback=self.parse)

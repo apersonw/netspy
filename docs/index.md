@@ -15,17 +15,17 @@ pip install "netspy[all]"     # 含浏览器渲染 / MongoDB / MySQL / Redis / C
 ## 30 秒示例
 
 ```python
-import netspy as mw
+import netspy as ns
 
 
-class NewsSpider(mw.AirSpider):
+class NewsSpider(ns.AirSpider):
     def start_requests(self):
         for page in range(1, 6):
-            yield mw.Request(f"https://example.com/news?p={page}", callback=self.parse)
+            yield ns.Request(f"https://example.com/news?p={page}", callback=self.parse)
 
     def parse(self, request, response):
         for a in response.xpath('//a[@class="title"]'):
-            item = mw.Item()
+            item = ns.Item()
             item.table_name = "news"
             item.title = a.xpath("./text()").extract_first()
             item.url = response.urljoin(a.xpath("./@href").extract_first())

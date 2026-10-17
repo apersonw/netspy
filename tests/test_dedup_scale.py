@@ -37,7 +37,7 @@ def test_memory_bloom_warns_once_when_over_capacity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 项目用的是 loguru，caplog 抓不到 —— 照 test_log.py 的做法写文件再读
-    logfile = tmp_path / "mw.log"
+    logfile = tmp_path / "ns.log"
     monkeypatch.setattr(setting, "LOG_FILE", str(logfile))
     monkeypatch.setattr(setting, "LOG_LEVEL", "WARNING")
     log.configure()

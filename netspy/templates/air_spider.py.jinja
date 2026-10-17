@@ -1,18 +1,18 @@
-import netspy as mw
+import netspy as ns
 
 
-class {{ class_name }}(mw.AirSpider):
+class {{ class_name }}(ns.AirSpider):
     __custom_setting__ = dict(
         SPIDER_THREAD_COUNT=4,
         SPIDER_MAX_RETRY_TIMES=3,
     )
 
     def start_requests(self):
-        yield mw.Request("https://example.com", callback=self.parse)
+        yield ns.Request("https://example.com", callback=self.parse)
 
     def parse(self, request, response):
         # response.xpath(...) / .css(...) / .re(...) / .text / .json()
-        item = mw.Item()
+        item = ns.Item()
         item.table_name = "{{ table_name }}"
         item.url = request.url
         item.title = response.xpath("//title/text()").extract_first()

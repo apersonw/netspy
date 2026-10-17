@@ -46,8 +46,8 @@ class MiddlewareManager:
         self._mws.insert(0, middleware)
 
     def process_request(self, request: Request) -> Request | Response:
-        for mw in self._mws:
-            handler = getattr(mw, "process_request", None)
+        for ns in self._mws:
+            handler = getattr(ns, "process_request", None)
             if handler is None:
                 continue
             out = handler(request)
@@ -59,8 +59,8 @@ class MiddlewareManager:
         return request
 
     def process_response(self, request: Request, response: Response) -> Response | Request:
-        for mw in reversed(self._mws):
-            handler = getattr(mw, "process_response", None)
+        for ns in reversed(self._mws):
+            handler = getattr(ns, "process_response", None)
             if handler is None:
                 continue
             out = handler(request, response)

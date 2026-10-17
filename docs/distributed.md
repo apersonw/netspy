@@ -11,15 +11,15 @@ pip install "netspy[redis]"
 和 `AirSpider` 一模一样，只是换个基类：
 
 ```python
-import netspy as mw
+import netspy as ns
 
 
-class NewsSpider(mw.Spider):
+class NewsSpider(ns.Spider):
     __custom_setting__ = dict(REDIS_URL="redis://localhost:6379/0")
 
     def start_requests(self):
         for page in range(1, 100):
-            yield mw.Request(f"https://example.com/news?p={page}", callback=self.parse)
+            yield ns.Request(f"https://example.com/news?p={page}", callback=self.parse)
 
     def parse(self, request, response):
         ...
@@ -314,12 +314,12 @@ redis-cli DEL netspy:NewsSpider:dedup:bloom \
 （默认 Redis list）拉一批任务，对每个任务调 `task_requests(task)` 生成请求。
 
 ```python
-import netspy as mw
+import netspy as ns
 
 
-class ProductSpider(mw.TaskSpider):
+class ProductSpider(ns.TaskSpider):
     def task_requests(self, task):
-        yield mw.Request(
+        yield ns.Request(
             f"https://shop.com/p/{task['id']}",
             callback=self.parse,
             cb_kwargs={"task": task},
@@ -348,7 +348,7 @@ ProductSpider(keep_alive=True).start() # 常驻，队列空也不退出
 覆写 `fetch_tasks(self, limit)` 可换成从 MySQL / Mongo 查：
 
 ```python
-class ProductSpider(mw.TaskSpider):
+class ProductSpider(ns.TaskSpider):
     def fetch_tasks(self, limit):
         rows = db.query("SELECT id FROM crawl_task WHERE status=0 LIMIT %s", limit)
         db.execute("UPDATE crawl_task SET status=1 WHERE id IN ...")   # 标记为处理中

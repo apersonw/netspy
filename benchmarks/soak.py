@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from server import BenchServer
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 from netspy.network.downloader import close_default_downloaders
 
@@ -78,11 +78,11 @@ def _configure(threads: int) -> None:
     log.configure()
 
 
-def _spider(url: str, n: int, session: bool) -> mw.AirSpider:
-    class SoakSpider(mw.AirSpider):
+def _spider(url: str, n: int, session: bool) -> ns.AirSpider:
+    class SoakSpider(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(n):
-                yield mw.Request(
+                yield ns.Request(
                     f"{url}/?i={i}",
                     callback=self.parse,
                     filter_repeat=False,

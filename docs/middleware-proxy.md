@@ -120,4 +120,4 @@ PROXY_BAN_MAX_SECONDS = 900.0  # 退避封顶
     **升级前写的自定义代理池不受影响**：三个新钩子都是可选的，没实现就跳过 ——
     对 `report_suspect` 而言「跳过」正好等于「目标站的锅不算代理头上」。
 
-单个请求也可指定：`mw.Request(url, proxy="http://user:pass@host:port")`。
+单个请求也可指定：`ns.Request(url, proxy="http://user:pass@host:port")`。

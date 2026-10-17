@@ -23,12 +23,12 @@ news_crawler/
 `spiders/news_crawler_spider.py`：
 
 ```python
-import netspy as mw
+import netspy as ns
 
 
-class NewsCrawlerSpider(mw.AirSpider):
+class NewsCrawlerSpider(ns.AirSpider):
     def start_requests(self):
-        yield mw.Request("https://news.ycombinator.com/", callback=self.parse)
+        yield ns.Request("https://news.ycombinator.com/", callback=self.parse)
 
     def parse(self, request, response):
         for row in response.css("span.titleline > a"):

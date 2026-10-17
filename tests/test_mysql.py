@@ -138,7 +138,7 @@ def test_create_item_from_table(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     text = path.read_text(encoding="utf-8")
     ast.parse(text)
     assert path.name == "news_item.py"
-    assert "class NewsItem(mw.Item)" in text
+    assert "class NewsItem(ns.Item)" in text
     assert '__table_name__ = "news"' in text
     assert "__unique_key__ = ['id']" in text
     assert "id: object  # 主键" in text

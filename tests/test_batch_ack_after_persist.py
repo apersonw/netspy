@@ -283,7 +283,7 @@ def test_worker_actually_sets_the_context() -> None:
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.utils import log
 
@@ -310,9 +310,9 @@ def test_worker_actually_sets_the_context() -> None:
     setting.ITEM_PIPELINES = []
     log.configure()
 
-    class _Spider(mw.AirSpider):
+    class _Spider(ns.AirSpider):
         def start_requests(self) -> Any:
-            yield mw.Request(f"http://127.0.0.1:{port}/p/1", callback=self.parse_page)
+            yield ns.Request(f"http://127.0.0.1:{port}/p/1", callback=self.parse_page)
 
         def parse_page(self, request: Any, response: Any) -> Any:
             seen.append((context.get_current_request(), context.get_current_item_buffer()))

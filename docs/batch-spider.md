@@ -28,14 +28,14 @@ CREATE TABLE `crawl_task` (
 ## 写爬虫
 
 ```python
-import netspy as mw
+import netspy as ns
 
 
-class CrawlTask(mw.BatchSpider):
+class CrawlTask(ns.BatchSpider):
     __task_table__ = "crawl_task"
 
     def task_requests(self, task):                 # 一行任务 -> 请求（必须实现）
-        yield mw.Request(task["url"], callback=self.parse)
+        yield ns.Request(task["url"], callback=self.parse)
 
     def parse(self, request, response, task):      # 框架自动带上 task
         yield {"url": task["url"], "title": response.css("h1::text").get()}

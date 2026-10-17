@@ -71,15 +71,15 @@ def _logged_in(response: Response) -> bool:
 
 def test_empty_pool_does_not_send_the_request() -> None:
     """匿名发出去的话，需要登录的站会回一张登录墙 —— 而那会被当成数据入库。"""
-    mw = UserPoolMiddleware(_Pool(), check_login=_logged_in)
+    ns = UserPoolMiddleware(_Pool(), check_login=_logged_in)
     with pytest.raises(UserUnavailableError):
-        mw.process_request(_req())
+        ns.process_request(_req())
 
 
 def test_anonymous_is_an_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(setting, "USER_POOL_ALLOW_ANONYMOUS", True)
-    mw = UserPoolMiddleware(_Pool(), check_login=_logged_in)
-    assert mw.process_request(_req()) is None
+    ns = UserPoolMiddleware(_Pool(), check_login=_logged_in)
+    assert ns.process_request(_req()) is None
 
 
 def test_check_login_runs_even_without_an_account(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,10 +89,10 @@ def test_check_login_runs_even_without_an_account(monkeypatch: pytest.MonkeyPatc
     """
     monkeypatch.setattr(setting, "USER_POOL_ALLOW_ANONYMOUS", True)
     pool = _Pool()
-    mw = UserPoolMiddleware(pool, check_login=_logged_in)
+    ns = UserPoolMiddleware(pool, check_login=_logged_in)
     request = _req()
-    mw.process_request(request)  # 没账号，匿名放行
-    out = mw.process_response(request, _wall())
+    ns.process_request(request)  # 没账号，匿名放行
+    out = ns.process_response(request, _wall())
     assert isinstance(out, Request), "登录墙被当成有效响应交给 parse 了"
     assert pool.bad == [], "没有账号可拉黑，不该对 None 调 report_bad"
 
@@ -104,10 +104,10 @@ def test_valid_anonymous_response_is_not_wrongly_failed(
     那会把允许匿名的场景全砸掉。"""
     monkeypatch.setattr(setting, "USER_POOL_ALLOW_ANONYMOUS", True)
     pool = _Pool()
-    mw = UserPoolMiddleware(pool, check_login=_logged_in)
+    ns = UserPoolMiddleware(pool, check_login=_logged_in)
     request = _req()
-    mw.process_request(request)
-    assert isinstance(mw.process_response(request, _data()), Response)
+    ns.process_request(request)
+    assert isinstance(ns.process_response(request, _data()), Response)
     assert pool.ok == [], "没有账号，不该对 None 调 report_ok"
 
 
@@ -116,10 +116,10 @@ def test_bad_account_is_still_blacklisted() -> None:
     pool = _Pool()
     user = User(username="u1", cookies={"sid": "x"})
     pool.stock.append(user)
-    mw = UserPoolMiddleware(pool, check_login=_logged_in)
+    ns = UserPoolMiddleware(pool, check_login=_logged_in)
     request = _req()
-    mw.process_request(request)
-    assert isinstance(mw.process_response(request, _wall()), Request)
+    ns.process_request(request)
+    assert isinstance(ns.process_response(request, _wall()), Request)
     assert pool.bad == [user]
 
 
@@ -133,8 +133,8 @@ def test_waits_for_an_account_to_come_back() -> None:
         pool.stock.append(user)
 
     threading.Thread(target=restock, daemon=True).start()
-    mw = UserPoolMiddleware(pool, check_login=_logged_in)
-    out = mw.process_request(_req())
+    ns = UserPoolMiddleware(pool, check_login=_logged_in)
+    out = ns.process_request(_req())
     assert isinstance(out, Request)
     assert out.requests_kwargs["cookies"]["sid"] == "x"
 
@@ -147,10 +147,10 @@ def test_account_shortage_does_not_trip_the_circuit_breaker() -> None:
 def test_existing_cookies_are_preserved() -> None:
     pool = _Pool()
     pool.stock.append(User(username="u1", cookies={"sid": "x"}))
-    mw = UserPoolMiddleware(pool, check_login=_logged_in)
+    ns = UserPoolMiddleware(pool, check_login=_logged_in)
     request = _req()
     request.requests_kwargs["cookies"] = {"lang": "zh"}
-    out = mw.process_request(request)
+    out = ns.process_request(request)
     assert isinstance(out, Request)
     assert out.requests_kwargs["cookies"] == {"lang": "zh", "sid": "x"}
 

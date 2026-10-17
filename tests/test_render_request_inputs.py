@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 from netspy.exceptions import RequestError
 from netspy.network.downloader._playwright import PlaywrightDownloader, _render_inputs
@@ -169,7 +169,7 @@ def test_user_pool_accounts_survive_a_rendered_request(
     }.items():
         monkeypatch.setattr(setting, name, value)
     base, _ = site
-    pool = mw.LocalUserPool(
+    pool = ns.LocalUserPool(
         [
             {"username": "alice", "cookies": {"sid": "SECRET"}},
             {"username": "bob", "cookies": {"sid": "SECRET"}},
@@ -177,17 +177,17 @@ def test_user_pool_accounts_survive_a_rendered_request(
     )
     pages: list[str] = []
 
-    class S(mw.AirSpider):
-        def user_pool(self) -> mw.LocalUserPool:
+    class S(ns.AirSpider):
+        def user_pool(self) -> ns.LocalUserPool:
             return pool
 
-        def check_login(self, response: mw.Response) -> bool:
+        def check_login(self, response: ns.Response) -> bool:
             return "welcome" in response.text
 
-        def start_requests(self) -> Iterator[mw.Request]:
-            yield mw.Request(f"{base}/r", render=True, callback=self.parse)
+        def start_requests(self) -> Iterator[ns.Request]:
+            yield ns.Request(f"{base}/r", render=True, callback=self.parse)
 
-        def parse(self, request: mw.Request, response: mw.Response) -> None:
+        def parse(self, request: ns.Request, response: ns.Response) -> None:
             pages.append(response.text)
 
     S(thread_count=1).start()

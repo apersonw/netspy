@@ -141,7 +141,7 @@ NETSPY_SPIDER_THREAD_COUNT=8 NETSPY_LOG_LEVEL=DEBUG python main.py
 `from netspy.utils.log import get_logger` 再手动 bind 一个名字：
 
 ```python
-class BookSpider(mw.AirSpider):
+class BookSpider(ns.AirSpider):
     def parse(self, request, response):
         self.logger.info("抓到 {} 条", len(items))
 ```
@@ -149,7 +149,7 @@ class BookSpider(mw.AirSpider):
 `AirSpider` / `Spider` / `BatchSpider` / `TaskSpider`（继承自 `BaseParser`）、
 `BasePipeline`、`DownloaderMiddleware`、`UserPool` 都已经带了它——日志里的
 名字就是这个子类自己的类名（比如上面这行会显示 `BookSpider`，不是一个
-和具体类没关系的固定名字）。模块级的 `mw.log` / `mw.get_logger(name)`
+和具体类没关系的固定名字）。模块级的 `ns.log` / `ns.get_logger(name)`
 还在，写在类外面（脚本级代码、独立函数）时用那两个。
 
 ## `USE_SESSION` 与分片

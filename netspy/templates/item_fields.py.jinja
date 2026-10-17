@@ -1,7 +1,7 @@
-import netspy as mw
+import netspy as ns
 
 
-class {{ class_name }}(mw.Item):
+class {{ class_name }}(ns.Item):
     """{{ class_name }}（表 `{{ table_name }}`，由 `netspy create -i --table` 反射生成）。
 
     用法：item = {{ class_name }}(); item.xxx = ...; yield item

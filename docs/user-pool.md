@@ -5,12 +5,12 @@
 爬虫里覆写两个方法即可，调度器会自动把池子挂到下载链上：
 
 ```python
-import netspy as mw
+import netspy as ns
 
 
-class MallSpider(mw.Spider):
+class MallSpider(ns.Spider):
     def user_pool(self):
-        return mw.LocalUserPool(
+        return ns.LocalUserPool(
             users=[
                 {"username": "u1", "password": "p1"},
                 {"username": "u2", "password": "p2"},
@@ -19,7 +19,7 @@ class MallSpider(mw.Spider):
         )
 
     def login(self, user):
-        resp = mw.Request(
+        resp = ns.Request(
             "https://mall.com/api/login",
             method="POST",
             data={"user": user.username, "pwd": user.password},
@@ -30,7 +30,7 @@ class MallSpider(mw.Spider):
         return "请先登录" not in response.text   # False -> 拉黑当前账号，换号重试
 
     def start_requests(self):
-        yield mw.Request("https://mall.com/orders", callback=self.parse)
+        yield ns.Request("https://mall.com/orders", callback=self.parse)
 
     def parse(self, request, response):
         ...
@@ -68,11 +68,11 @@ class MallSpider(mw.Spider):
 ```python
 # 游客
 def user_pool(self):
-    return mw.GuestUserPool(login=self.get_guest_cookie, size=5)
+    return ns.GuestUserPool(login=self.get_guest_cookie, size=5)
 
 # 分布式共享账号
 def user_pool(self):
-    return mw.RedisUserPool(
+    return ns.RedisUserPool(
         "MallSpider",
         accounts=[{"username": "u1", "password": "p1"}, ...],
         login=self.login,
@@ -83,13 +83,13 @@ def user_pool(self):
 ## 手动用
 
 ```python
-pool = mw.LocalUserPool([{"username": "u1"}], login=my_login)
+pool = ns.LocalUserPool([{"username": "u1"}], login=my_login)
 user = pool.get()
 try:
-    resp = mw.Request(url, cookies=user.cookies).download()
+    resp = ns.Request(url, cookies=user.cookies).download()
     pool.report_ok(user)
 except SomethingBad:
     pool.report_bad(user, block_seconds=600)
 ```
 
-单个请求也能直接指定 cookie：`mw.Request(url, cookies={"sid": "..."})`。
+单个请求也能直接指定 cookie：`ns.Request(url, cookies={"sid": "..."})`。

@@ -169,7 +169,7 @@ log.get_logger("t").warning("该出现")
 
 
 def test_configure_writes_to_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    logfile = tmp_path / "mw.log"
+    logfile = tmp_path / "ns.log"
     monkeypatch.setattr(setting, "LOG_FILE", str(logfile))
     log.configure()
     log.get_logger("t").warning("写到文件")
@@ -178,7 +178,7 @@ def test_configure_writes_to_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 def test_level_filters_lower_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    logfile = tmp_path / "mw.log"
+    logfile = tmp_path / "ns.log"
     monkeypatch.setattr(setting, "LOG_FILE", str(logfile))
     monkeypatch.setattr(setting, "LOG_LEVEL", "WARNING")
     log.configure()
@@ -201,7 +201,7 @@ def test_level_filters_lower_messages(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_logger_mixin_binds_the_subclass_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    logfile = tmp_path / "mw.log"
+    logfile = tmp_path / "ns.log"
     monkeypatch.setattr(setting, "LOG_FILE", str(logfile))
     log.configure()
 
@@ -218,7 +218,7 @@ def test_logger_mixin_distinguishes_different_classes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """两个不同的子类各自打一行——日志里得分得清是谁打的。"""
-    logfile = tmp_path / "mw.log"
+    logfile = tmp_path / "ns.log"
     monkeypatch.setattr(setting, "LOG_FILE", str(logfile))
     log.configure()
 

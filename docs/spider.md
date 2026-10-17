@@ -2,17 +2,17 @@
 
 ## AirSpider
 
-继承 `mw.AirSpider`，实现 `start_requests`（产出种子请求）和 `parse`（解析）：
+继承 `ns.AirSpider`，实现 `start_requests`（产出种子请求）和 `parse`（解析）：
 
 ```python
-class MySpider(mw.AirSpider):
+class MySpider(ns.AirSpider):
     __custom_setting__ = dict(SPIDER_THREAD_COUNT=8)  # 合并进全局配置
 
     def start_requests(self):
-        yield mw.Request("https://example.com", callback=self.parse)
+        yield ns.Request("https://example.com", callback=self.parse)
 
     def parse(self, request, response):
-        yield mw.Request(response.urljoin("/next"), callback=self.parse_detail)
+        yield ns.Request(response.urljoin("/next"), callback=self.parse_detail)
         yield {"url": request.url}          # dict 或 Item 都行
 
     def parse_detail(self, request, response):
@@ -25,8 +25,8 @@ MySpider().start()          # 阻塞至爬完并优雅退出
 
 | yield 的东西 | 去向 |
 |---|---|
-| `mw.Request` | 回到调度队列（去重后） |
-| `mw.Item` / `dict` | 进 ItemBuffer → 批量落库 |
+| `ns.Request` | 回到调度队列（去重后） |
+| `ns.Item` / `dict` | 进 ItemBuffer → 批量落库 |
 | 可调用对象 | 在当前工作线程执行 |
 
 打日志直接 `self.logger`，不用自己 `import logging` 或 `get_logger`——日志里
@@ -40,7 +40,7 @@ def parse(self, request, response):
 ## Request
 
 ```python
-mw.Request(
+ns.Request(
     url,
     method="GET",
     callback=self.parse,          # 方法、函数或方法名字符串
@@ -60,16 +60,16 @@ mw.Request(
 ## 钩子
 
 ```python
-class MySpider(mw.AirSpider):
+class MySpider(ns.AirSpider):
     def download_midware(self, request):
         request.headers = {"Referer": "https://example.com"}
         return request                       # 返回 None 用原请求
 
     def validate(self, request, response):
         if response.status_code != 200:
-            raise mw.ValidationError("非 200")   # -> 重试
+            raise ns.ValidationError("非 200")   # -> 重试
         if "验证码" in response.text:
-            raise mw.NotRetryError("被封")       # -> 直接丢弃
+            raise ns.NotRetryError("被封")       # -> 直接丢弃
         return True                              # False 也表示丢弃
 
     def failed_request(self, request, response):

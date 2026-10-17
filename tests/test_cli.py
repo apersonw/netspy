@@ -11,7 +11,7 @@ import pytest
 from pytest_httpserver import HTTPServer
 from typer.testing import CliRunner
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 from netspy.commands import create as gen
 from netspy.commands.cmdline import app
@@ -85,7 +85,7 @@ def test_scaffolded_spider_actually_imports(
 ) -> None:
     """`ast.parse` 只证明语法合法 —— 模板引用一个不存在的 API 它照样通过。
 
-    实测：把模板里的 `mw.Request` 改成 `mw.RequestXXX`，既有用例仍然 5 passed，
+    实测：把模板里的 `ns.Request` 改成 `ns.RequestXXX`，既有用例仍然 5 passed，
     而每个新用户生成的项目都跑不起来。脚手架是新用户碰到的第一样东西。
 
     这里真的把爬虫模块 import 进来并实例化。不真跑抓取 ——
@@ -103,11 +103,11 @@ def test_scaffolded_spider_actually_imports(
 
     # 必须**迭代** start_requests：模板里的调用写在生成器体内，
     # 光 import + 实例化执行不到它 —— 第一版守卫就漏在这里，
-    # 把 mw.Request 改成 mw.RequestXXX 之后用例照样绿。
+    # 把 ns.Request 改成 ns.RequestXXX 之后用例照样绿。
     # 迭代只构造 Request 对象、不发请求，所以既不联网也不慢。
     seeds = list(spider.start_requests())
     assert seeds, "start_requests 一个种子都没产出"
-    assert all(isinstance(r, mw.Request) for r in seeds)
+    assert all(isinstance(r, ns.Request) for r in seeds)
 
 
 def test_scaffolded_settings_all_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,8 +145,8 @@ def test_create_spider_and_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     spider = (tmp_path / "news_list_spider.py").read_text(encoding="utf-8")
     item = (tmp_path / "news_detail_item.py").read_text(encoding="utf-8")
-    assert "class NewsListSpider(mw.AirSpider)" in spider
-    assert "class NewsDetailItem(mw.Item)" in item
+    assert "class NewsListSpider(ns.AirSpider)" in spider
+    assert "class NewsDetailItem(ns.Item)" in item
     assert '__table_name__ = "news_detail"' in item
 
 
@@ -166,7 +166,7 @@ def test_shell_namespace(httpserver: HTTPServer) -> None:
     ns = build_namespace(httpserver.url_for("/"))
     assert ns["response"].xpath("//h1/text()").get() == "hi"
     assert ns["request"].url == httpserver.url_for("/")
-    assert "mw" in ns
+    assert "ns" in ns
 
 
 # ---------------------------------------------------------------- retry

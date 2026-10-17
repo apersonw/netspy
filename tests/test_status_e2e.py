@@ -15,7 +15,7 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Request as WRequest
 from werkzeug.wrappers import Response as WResponse
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 from netspy.network.downloader import close_default_downloaders
 
@@ -36,7 +36,7 @@ def _quiet() -> Iterator[None]:
     throttle.reset()
 
 
-def _run(spider: mw.AirSpider) -> None:
+def _run(spider: ns.AirSpider) -> None:
     spider.start()
 
 
@@ -46,9 +46,9 @@ def test_404_never_reaches_parse(httpserver: HTTPServer) -> None:
     parsed: list[Any] = []
     failed: list[Any] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(httpserver.url_for("/gone"), callback=self.parse)
+            yield ns.Request(httpserver.url_for("/gone"), callback=self.parse)
 
         def parse(self, request, response):  # type: ignore[no-untyped-def]
             parsed.append(response.status_code)
@@ -70,9 +70,9 @@ def test_404_reaches_parse_when_accepted(
     httpserver.expect_request("/gone").respond_with_data("gone", status=404)
     parsed: list[int] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(httpserver.url_for("/gone"), callback=self.parse)
+            yield ns.Request(httpserver.url_for("/gone"), callback=self.parse)
 
         def parse(self, request, response):  # type: ignore[no-untyped-def]
             parsed.append(response.status_code)
@@ -94,9 +94,9 @@ def test_429_retries_and_honors_retry_after(httpserver: HTTPServer) -> None:
     httpserver.expect_request("/limited").respond_with_handler(handler)
     parsed: list[str] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(httpserver.url_for("/limited"), callback=self.parse)
+            yield ns.Request(httpserver.url_for("/limited"), callback=self.parse)
 
         def parse(self, request, response):  # type: ignore[no-untyped-def]
             parsed.append(response.xpath("//h1/text()").get() or "")
@@ -117,9 +117,9 @@ def test_retry_after_too_long_gives_up(
     )
     failed: list[int] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(httpserver.url_for("/limited"), callback=self.parse)
+            yield ns.Request(httpserver.url_for("/limited"), callback=self.parse)
 
         def parse(self, request, response):  # type: ignore[no-untyped-def]
             return None
@@ -141,9 +141,9 @@ def test_3xx_still_reaches_parse_when_redirects_disabled(httpserver: HTTPServer)
     )
     got: list[int] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(
+            yield ns.Request(
                 httpserver.url_for("/from"), callback=self.parse, allow_redirects=False
             )
 
@@ -162,9 +162,9 @@ def test_check_disabled_restores_0_6_behavior(
     httpserver.expect_request("/gone").respond_with_data("<h1>404 page</h1>", status=404)
     parsed: list[int] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(httpserver.url_for("/gone"), callback=self.parse)
+            yield ns.Request(httpserver.url_for("/gone"), callback=self.parse)
 
         def parse(self, request, response):  # type: ignore[no-untyped-def]
             parsed.append(response.status_code)
@@ -200,10 +200,10 @@ def test_concurrency_cap_observed_by_server(
 
     httpserver.expect_request("/p").respond_with_handler(handler)
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(12):
-                yield mw.Request(
+                yield ns.Request(
                     httpserver.url_for("/p") + f"?i={i}",
                     callback=self.parse,
                     filter_repeat=False,
@@ -228,10 +228,10 @@ def test_default_cap_does_not_bind_default_threads(
     httpserver.expect_request("/q").respond_with_data("<h1>ok</h1>", content_type="text/html")
     seen: list[int] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(8):
-                yield mw.Request(
+                yield ns.Request(
                     httpserver.url_for("/q") + f"?i={i}",
                     callback=self.parse,
                     filter_repeat=False,

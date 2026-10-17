@@ -123,7 +123,7 @@ def _run_node(
     子进程不需要 monkeypatch —— get_redis() 读 setting.REDIS_URL，
     配上它就会连真 Redis，这正是生产里的真实路径。
     """
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.utils import log
 
@@ -152,15 +152,15 @@ def _run_node(
         setting.SPIDER_TASK_LEASE = lease
     log.configure()
 
-    class NodeSpider(mw.Spider):
+    class NodeSpider(ns.Spider):
         __redis_key__ = redis_key
 
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(seed_url, callback=self.parse_seed)
+            yield ns.Request(seed_url, callback=self.parse_seed)
 
         def parse_seed(self, request, response):  # type: ignore[no-untyped-def]
             for href in response.css("a::attr(href)").getall():
-                yield mw.Request(response.urljoin(href), callback=self.parse_page)
+                yield ns.Request(response.urljoin(href), callback=self.parse_page)
 
         def parse_page(self, request, response):  # type: ignore[no-untyped-def]
             if store:
@@ -407,7 +407,7 @@ def _run_counting_node(
     if delay:
         _t.sleep(delay)
 
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.utils import log
 
@@ -427,13 +427,13 @@ def _run_counting_node(
     setting.COLLECTOR_TASK_COUNT = 3
     log.configure()
 
-    class Node(mw.Spider):
+    class Node(ns.Spider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(seed_url, callback=self.parse_seed)
+            yield ns.Request(seed_url, callback=self.parse_seed)
 
         def parse_seed(self, request, response):  # type: ignore[no-untyped-def]
             for href in response.css("a::attr(href)").getall():
-                yield mw.Request(response.urljoin(href), callback=self.parse_page)
+                yield ns.Request(response.urljoin(href), callback=self.parse_page)
 
         def parse_page(self, request, response):  # type: ignore[no-untyped-def]
             return None
@@ -451,12 +451,12 @@ def _seed_later(redis_url: str, redis_key: str, seed_url: str, delay: float) -> 
     from netspy import setting
 
     setting.REDIS_URL = redis_url
-    import netspy as mw
+    import netspy as ns
     from netspy.core.task_queue import RedisTaskQueue
     from netspy.db.redisdb import get_redis
 
     ns = f"{setting.REDIS_KEY_PREFIX}:{redis_key}"
-    RedisTaskQueue(ns, get_redis()).put(mw.Request(seed_url, callback="parse_seed"))
+    RedisTaskQueue(ns, get_redis()).put(ns.Request(seed_url, callback="parse_seed"))
 
 
 def test_node_waits_when_another_is_still_seeding(httpserver: HTTPServer, clean_redis: str) -> None:

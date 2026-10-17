@@ -63,7 +63,7 @@ def _fast(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def logfile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # 项目用 loguru，caplog 抓不到 —— 照 test_log.py 的做法写文件再读
-    path = tmp_path / "mw.log"
+    path = tmp_path / "ns.log"
     monkeypatch.setattr(setting, "LOG_FILE", str(path))
     monkeypatch.setattr(setting, "LOG_LEVEL", "INFO")
     log.configure()

@@ -291,12 +291,12 @@ def test_middleware_attaches_cookies_and_reports_ok() -> None:
     reports: list[str] = []
     pool.report_ok = lambda u: reports.append(f"ok:{u.username}")  # type: ignore[method-assign]
 
-    mw = UserPoolMiddleware(pool)
-    req = mw.process_request(Request("https://x"))
+    ns = UserPoolMiddleware(pool)
+    req = ns.process_request(Request("https://x"))
     assert isinstance(req, Request)
     assert req.requests_kwargs["cookies"] == {"sid": "s1"}
 
-    out = mw.process_response(req, Response(url="https://x", status_code=200))
+    out = ns.process_response(req, Response(url="https://x", status_code=200))
     assert isinstance(out, Response)
     assert reports == ["ok:a"]
 
@@ -305,15 +305,15 @@ def test_middleware_rotates_on_login_failure() -> None:
     pool = LocalUserPool(
         [{"username": "a", "cookies": {"c": "1"}}, {"username": "b", "cookies": {"c": "2"}}]
     )
-    mw = UserPoolMiddleware(pool, check_login=lambda resp: "登录" not in resp.text)
+    ns = UserPoolMiddleware(pool, check_login=lambda resp: "登录" not in resp.text)
 
-    req = mw.process_request(Request("https://x"))
+    req = ns.process_request(Request("https://x"))
     logged_out = Response(url="https://x", status_code=200, content="请先登录".encode())
-    retry = mw.process_response(req, logged_out)
+    retry = ns.process_response(req, logged_out)
     assert isinstance(retry, Request)  # 触发重试
     assert "cookies" not in retry.requests_kwargs
     # a 被拉黑，下次拿到 b
-    assert mw.process_request(Request("https://x")).requests_kwargs["cookies"] == {"c": "2"}
+    assert ns.process_request(Request("https://x")).requests_kwargs["cookies"] == {"c": "2"}
 
 
 # 换号时上一个号的 cookie 不能留在请求上。实测复现：alice 失败、换 bob 重试，
@@ -325,12 +325,12 @@ _BOB = {"username": "bob", "cookies": {"sid": "BOB"}}
 
 
 def test_retried_request_does_not_carry_the_previous_accounts_cookies() -> None:
-    mw = UserPoolMiddleware(LocalUserPool([_ALICE, _BOB]))
+    ns = UserPoolMiddleware(LocalUserPool([_ALICE, _BOB]))
     req = Request("https://x", cookies={"lang": "zh"})
 
-    mw.process_request(req)  # alice
+    ns.process_request(req)  # alice
     assert req.requests_kwargs["cookies"] == {"lang": "zh", "sid": "ALICE", "device": "ALICE-PHONE"}
-    mw.process_request(req)  # 同一个对象被重试（parser_control 的 put_retry），换成 bob
+    ns.process_request(req)  # 同一个对象被重试（parser_control 的 put_retry），换成 bob
     assert req.requests_kwargs["cookies"] == {"lang": "zh", "sid": "BOB"}, (
         "bob 的请求带上了 alice 的 cookie"
     )
@@ -339,26 +339,26 @@ def test_retried_request_does_not_carry_the_previous_accounts_cookies() -> None:
 def test_account_switch_survives_a_trip_through_the_redis_queue() -> None:
     """分布式下重试的请求会序列化进 Redis、可能被别的节点领走——「请求自己的
     cookie 是哪些」必须跟着序列化走，不能只存在进程内存里。"""
-    mw = UserPoolMiddleware(LocalUserPool([_ALICE, _BOB]))
+    ns = UserPoolMiddleware(LocalUserPool([_ALICE, _BOB]))
     req = Request("https://x", cookies={"lang": "zh"})
-    mw.process_request(req)  # alice
+    ns.process_request(req)  # alice
 
     on_other_node = Request.from_dict(req.to_dict())
-    mw.process_request(on_other_node)  # bob
+    ns.process_request(on_other_node)  # bob
     assert on_other_node.requests_kwargs["cookies"] == {"lang": "zh", "sid": "BOB"}
 
 
 def test_login_retry_keeps_the_requests_own_cookies() -> None:
     """失效重试只该去掉失效账号的 cookie，请求自己带的 cookie 要留着。"""
     pool = LocalUserPool([_ALICE, _BOB])
-    mw = UserPoolMiddleware(pool, check_login=lambda resp: "登录" not in resp.text)
-    req = mw.process_request(Request("https://x", cookies={"lang": "zh"}))
-    retry = mw.process_response(
+    ns = UserPoolMiddleware(pool, check_login=lambda resp: "登录" not in resp.text)
+    req = ns.process_request(Request("https://x", cookies={"lang": "zh"}))
+    retry = ns.process_response(
         req, Response(url="https://x", status_code=200, content="请先登录".encode())
     )
     assert isinstance(retry, Request)
     assert retry.requests_kwargs["cookies"] == {"lang": "zh"}
-    mw.process_request(retry)
+    ns.process_request(retry)
     assert retry.requests_kwargs["cookies"] == {"lang": "zh", "sid": "BOB"}
 
 
@@ -366,12 +366,12 @@ def test_anonymous_fallback_drops_the_previous_account(monkeypatch: pytest.Monke
     """号全没了、按配置匿名发出：那就真匿名——不带上一次的 cookie，也不再拿上一个号汇报。"""
     monkeypatch.setattr(setting, "USER_POOL_ALLOW_ANONYMOUS", True)
     pool = LocalUserPool([_ALICE])
-    mw = UserPoolMiddleware(pool)
+    ns = UserPoolMiddleware(pool)
     req = Request("https://x")
-    mw.process_request(req)  # alice
+    ns.process_request(req)  # alice
     pool.report_bad(pool._users[0], block_seconds=999)
 
-    assert mw.process_request(req) is None
+    assert ns.process_request(req) is None
     assert "cookies" not in req.requests_kwargs
     assert "_user" not in req.__dict__
 

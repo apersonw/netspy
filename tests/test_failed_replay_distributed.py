@@ -16,7 +16,7 @@ import fakeredis
 import pytest
 from pytest_httpserver import HTTPServer
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 from netspy.core import redis_scheduler
 from netspy.utils import tools
@@ -51,16 +51,16 @@ def _fast(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _fail(redis: Any, url: str) -> None:
     """模拟上一轮：这个请求重试耗尽，被推进了 Redis 失败列表。"""
-    redis.rpush(_FAILED, tools.dumps_json(mw.Request(url, callback="parse").to_dict()))
+    redis.rpush(_FAILED, tools.dumps_json(ns.Request(url, callback="parse").to_dict()))
 
 
-class _Spider(mw.Spider):
+class _Spider(ns.Spider):
     parsed: list[str] = []
 
-    def start_requests(self) -> Iterator[mw.Request]:
+    def start_requests(self) -> Iterator[ns.Request]:
         return iter(())
 
-    def parse(self, request: mw.Request, response: mw.Response) -> None:
+    def parse(self, request: ns.Request, response: ns.Response) -> None:
         type(self).parsed.append(request.url)
 
 
@@ -116,11 +116,11 @@ def test_task_spider_replays_too(
     _fail(fake_redis, url)
     parsed: list[str] = []
 
-    class T(mw.TaskSpider):
-        def task_requests(self, task: Any) -> Iterator[mw.Request]:
+    class T(ns.TaskSpider):
+        def task_requests(self, task: Any) -> Iterator[ns.Request]:
             return iter(())
 
-        def parse(self, request: mw.Request, response: mw.Response) -> None:
+        def parse(self, request: ns.Request, response: ns.Response) -> None:
             parsed.append(request.url)
 
     T(redis_key="replay_job", task_key="replay_job:tasks").start()

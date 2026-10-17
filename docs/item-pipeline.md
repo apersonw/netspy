@@ -3,7 +3,7 @@
 ## Item
 
 ```python
-class NewsItem(mw.Item):
+class NewsItem(ns.Item):
     __table_name__ = "news"          # 不写则由类名推导：NewsItem -> news
     __unique_key__ = ["url"]         # 指纹只用这些字段（不写则用全部非空字段）
 
@@ -238,7 +238,7 @@ dump 出来的每行**带着回放所需的全部信息**，而不只是表名�
 
 
 ```python
-class PriceItem(mw.UpdateItem):
+class PriceItem(ns.UpdateItem):
     __table_name__ = "price"
     __update_key__ = ["sku"]        # 按 sku 查已有记录，$set 更新，没有则插入
 ```

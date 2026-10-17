@@ -1,12 +1,12 @@
-import netspy as mw
+import netspy as ns
 
 
-class {{ spider_class }}(mw.AirSpider):
+class {{ spider_class }}(ns.AirSpider):
     def start_requests(self):
-        yield mw.Request("https://example.com", callback=self.parse)
+        yield ns.Request("https://example.com", callback=self.parse)
 
     def parse(self, request, response):
-        item = mw.Item()
+        item = ns.Item()
         item.table_name = "{{ project_name }}"
         item.url = request.url
         item.title = response.xpath("//title/text()").extract_first()
@@ -14,7 +14,7 @@ class {{ spider_class }}(mw.AirSpider):
 
         # 跟进链接示例：
         # for href in response.xpath("//a/@href").extract():
-        #     yield mw.Request(response.urljoin(href), callback=self.parse_detail)
+        #     yield ns.Request(response.urljoin(href), callback=self.parse_detail)
 
 
 if __name__ == "__main__":

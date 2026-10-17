@@ -62,7 +62,7 @@ def _pg_fields(url: str) -> dict[str, Any]:
 
 def _node(base: str, redis_url: str, pg_url: str, seed: bool) -> None:
     """一个爬虫节点（独立进程）。"""
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
 
     setting.reload()
@@ -90,19 +90,19 @@ def _node(base: str, redis_url: str, pg_url: str, seed: bool) -> None:
 
     log.configure()
 
-    class Row(mw.Item):
+    class Row(ns.Item):
         __table_name__ = TABLE
         __unique_key__ = ["url"]
         url: str = ""
         title: str = ""
 
-    class Node(mw.Spider):
+    class Node(ns.Spider):
         def start_requests(self) -> Any:
-            yield mw.Request(base + "/", callback="index", use_session=True)
+            yield ns.Request(base + "/", callback="index", use_session=True)
 
         def index(self, request: Any, response: Any) -> Any:
             for href in response.css("a::attr(href)").getall():
-                yield mw.Request(response.urljoin(href), callback="item", use_session=True)
+                yield ns.Request(response.urljoin(href), callback="item", use_session=True)
 
         def item(self, request: Any, response: Any) -> Any:
             title = response.css("h1.t::text").get()
@@ -162,7 +162,7 @@ def test_three_nodes_with_every_feature_on(
 
 def _dedup_node(base: str, redis_url: str, backend: str, ns: str) -> None:
     """只验去重的精简节点：种子是 /a 和 /b，两者都链到 /shared。"""
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
 
     setting.reload()
@@ -179,14 +179,14 @@ def _dedup_node(base: str, redis_url: str, backend: str, ns: str) -> None:
 
     log.configure()
 
-    class Node(mw.Spider):
+    class Node(ns.Spider):
         def start_requests(self) -> Any:
-            yield mw.Request(base + "/a", callback="idx")
-            yield mw.Request(base + "/b", callback="idx")
+            yield ns.Request(base + "/a", callback="idx")
+            yield ns.Request(base + "/b", callback="idx")
 
         def idx(self, request: Any, response: Any) -> Any:
             for href in response.css("a::attr(href)").getall():
-                yield mw.Request(response.urljoin(href), callback="leaf")
+                yield ns.Request(response.urljoin(href), callback="leaf")
 
         def leaf(self, request: Any, response: Any) -> None:
             return None
@@ -261,11 +261,11 @@ def test_distributed_warns_about_local_dedup(
     于是把 `_on_start` 里的调用整个删掉，用例照样 5 条全绿 —— 验的是方法本身，
     不是它有没有被接上去。
     """
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.utils import log
 
-    class Quiet(mw.Spider):
+    class Quiet(ns.Spider):
         def start_requests(self) -> Any:
             return iter(())
 

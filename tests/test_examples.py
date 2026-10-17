@@ -27,10 +27,10 @@ def test_example_imports_and_defines_spider() -> None:
     finally:
         sys.path.remove(str(EXAMPLES))
 
-    import netspy as mw
+    import netspy as ns
 
-    assert issubclass(ex.BookSpider, mw.AirSpider)
-    assert issubclass(ex.BookItem, mw.Item)
+    assert issubclass(ex.BookSpider, ns.AirSpider)
+    assert issubclass(ex.BookItem, ns.Item)
     assert ex.BookItem.__table_name__ == "books"
     assert ex.BookItem.__unique_key__ == ["url"]
     for hook in ("start_requests", "parse_list", "parse_book"):

@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from server import BenchServer
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 from netspy.network.downloader import close_default_downloaders
 
@@ -66,13 +66,13 @@ class Result:
         return self.avg_inflight / self.threads if self.threads else 0.0
 
 
-def _make_spider(url: str, n: int, parse_mode: str, session: bool) -> type[mw.AirSpider]:
-    class BenchSpider(mw.AirSpider):
+def _make_spider(url: str, n: int, parse_mode: str, session: bool) -> type[ns.AirSpider]:
+    class BenchSpider(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(n):
                 # 必须传 Request(use_session=)：setting.USE_SESSION 是个死配置，
                 # 框架从没读过它（benchmark 最早就是因为两行数字一模一样才暴露出来的）
-                yield mw.Request(
+                yield ns.Request(
                     f"{url}/?i={i}",
                     callback=self.parse,
                     filter_repeat=False,

@@ -7,11 +7,11 @@ from typing import Any
 
 
 def build_namespace(url: str, *, render: bool = False) -> dict[str, Any]:
-    import netspy as mw
+    import netspy as ns
 
-    request = mw.Request(url, render=render)
+    request = ns.Request(url, render=render)
     response = request.download()
-    return {"mw": mw, "request": request, "response": response}
+    return {"ns": ns, "request": request, "response": response}
 
 
 def run_shell(url: str, *, render: bool = False) -> None:

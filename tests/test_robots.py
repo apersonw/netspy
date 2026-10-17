@@ -176,7 +176,7 @@ def test_module_level_allowed_respects_rules(httpserver: HTTPServer) -> None:
 # ---- 端到端：完整 AirSpider 链路 --------------------------------------
 def test_disallowed_url_is_skipped_not_failed(httpserver: HTTPServer) -> None:
     """被 robots 拦下是**有意跳过**，不该计入失败、也不该产生请求。"""
-    import netspy as mw
+    import netspy as ns
     from netspy.utils import stats as sk
 
     _serve(httpserver, RULES)
@@ -193,10 +193,10 @@ def test_disallowed_url_is_skipped_not_failed(httpserver: HTTPServer) -> None:
     setting.SPIDER_THREAD_COUNT = 1
     parsed: list[str] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
-            yield mw.Request(httpserver.url_for("/private/secret"), callback=self.parse)
-            yield mw.Request(httpserver.url_for("/public/page"), callback=self.parse)
+            yield ns.Request(httpserver.url_for("/private/secret"), callback=self.parse)
+            yield ns.Request(httpserver.url_for("/public/page"), callback=self.parse)
 
         def parse(self, request, response):  # type: ignore[no-untyped-def]
             parsed.append(response.url)

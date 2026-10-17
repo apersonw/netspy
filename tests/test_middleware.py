@@ -94,7 +94,7 @@ def test_spider_middleware_adds_header(
     def handler(request: Any) -> Any:
         from werkzeug import Response as WResponse
 
-        seen["mw"] = request.headers.get("X-MW", "")
+        seen["ns"] = request.headers.get("X-MW", "")
         return WResponse("<html></html>", content_type="text/html")
 
     httpserver.expect_request("/p").respond_with_handler(handler)
@@ -107,4 +107,4 @@ def test_spider_middleware_adds_header(
             return None
 
     S().start()
-    assert seen["mw"] == "1"
+    assert seen["ns"] == "1"

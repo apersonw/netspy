@@ -19,7 +19,7 @@ playwright install chromium
 ## 用法
 
 ```python
-yield mw.Request(
+yield ns.Request(
     "https://spa.example.com/list",
     render=True,
     wait_for="ul.items li",          # 等这个选择器出现再取内容
@@ -142,7 +142,7 @@ def script(page):
     human_click(page, "button.load-more")
     human_type(page, "input#q", "关键词")
 
-yield mw.Request(url, render=True, render_script=script, callback=self.parse)
+yield ns.Request(url, render=True, render_script=script, callback=self.parse)
 ```
 
 `human_move` / `human_click` / `human_type` / `human_scroll` 四个函数：鼠标分步移动

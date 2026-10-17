@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-import netspy as mw
+import netspy as ns
 from integration_site import Site
 from netspy import setting
 from netspy.network import circuit, throttle
@@ -33,18 +33,18 @@ def _cleanup() -> Iterator[None]:
     setting.reload()
 
 
-class _Spider(mw.AirSpider):
+class _Spider(ns.AirSpider):
     def __init__(self, base: str, **kw: Any) -> None:
         self.base = base
         self.seen: list[str] = []
         super().__init__(**kw)
 
     def start_requests(self) -> Any:
-        yield mw.Request(self.base + "/", callback=self.index, use_session=True)
+        yield ns.Request(self.base + "/", callback=self.index, use_session=True)
 
     def index(self, request: Any, response: Any) -> Any:
         for href in response.css("a::attr(href)").getall():
-            yield mw.Request(response.urljoin(href), callback=self.item, use_session=True)
+            yield ns.Request(response.urljoin(href), callback=self.item, use_session=True)
 
     def item(self, request: Any, response: Any) -> Any:
         title = response.css("h1.t::text").get()
@@ -153,7 +153,7 @@ def test_items_land_in_a_real_database(postgres_db: Any) -> None:
     「爬虫跑完数据真进了库」这条整链没有覆盖。
     """
 
-    class Row(mw.Item):
+    class Row(ns.Item):
         __table_name__ = "fullstack_items"
         __unique_key__ = ["url"]
         url: str = ""
@@ -259,8 +259,8 @@ def test_circuit_breaker_stays_quiet_on_a_normal_crawl() -> None:
         def start_requests(self) -> Any:
             # 先把坏路径打满 —— 阈值过低的话，这里就该跳闸并殃及整个域
             for _ in range(4):
-                yield mw.Request(self.base + "/boom/500", callback=self.item, use_session=True)
-            yield mw.Request(self.base + "/", callback=self.index, use_session=True)
+                yield ns.Request(self.base + "/boom/500", callback=self.item, use_session=True)
+            yield ns.Request(self.base + "/", callback=self.index, use_session=True)
 
     with Site(n_items=N_ITEMS) as site:
         spider = BadFirst(site.url)

@@ -18,14 +18,14 @@
 
 from __future__ import annotations
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 
 BASE = "https://books.toscrape.com/"
 MAX_LIST_PAGES = 3  # 只抓前几页，示例不必贪多
 
 
-class BookItem(mw.Item):
+class BookItem(ns.Item):
     __table_name__ = "books"
     __unique_key__ = ["url"]  # 按 url 去重：重跑不会产生重复条目
 
@@ -36,19 +36,19 @@ class BookItem(mw.Item):
     rating: str
 
 
-class BookSpider(mw.AirSpider):
+class BookSpider(ns.AirSpider):
     def start_requests(self):  # type: ignore[no-untyped-def]
-        yield mw.Request(BASE, callback=self.parse_list, cb_kwargs={"page": 1})
+        yield ns.Request(BASE, callback=self.parse_list, cb_kwargs={"page": 1})
 
     def parse_list(self, request, response, page):  # type: ignore[no-untyped-def]
         # 详情页
         for href in response.css("h3 > a::attr(href)").getall():
-            yield mw.Request(response.urljoin(href), callback=self.parse_book)
+            yield ns.Request(response.urljoin(href), callback=self.parse_book)
 
         # 翻页：cb_kwargs 把页码带到下一次回调，用来控制深度
         next_href = response.css("li.next > a::attr(href)").get()
         if next_href and page < MAX_LIST_PAGES:
-            yield mw.Request(
+            yield ns.Request(
                 response.urljoin(next_href),
                 callback=self.parse_list,
                 cb_kwargs={"page": page + 1},

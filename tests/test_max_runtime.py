@@ -10,7 +10,7 @@ from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Request as WRequest
 from werkzeug.wrappers import Response as WResponse
 
-import netspy as mw
+import netspy as ns
 from netspy import setting
 from netspy.network import circuit, robots, throttle
 from netspy.network.downloader import close_default_downloaders
@@ -49,10 +49,10 @@ def test_max_runtime_stops_gracefully(
     httpserver.expect_request("/slow").respond_with_handler(handler)
     seen: list[int] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(2000):  # 远超 1s 能跑完的量
-                yield mw.Request(
+                yield ns.Request(
                     httpserver.url_for("/slow") + f"?i={i}",
                     callback=self.parse,
                     filter_repeat=False,
@@ -76,10 +76,10 @@ def test_zero_means_no_limit(httpserver: HTTPServer, monkeypatch: pytest.MonkeyP
     httpserver.expect_request("/q").respond_with_data("<h1>ok</h1>", content_type="text/html")
     seen: list[int] = []
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(6):
-                yield mw.Request(
+                yield ns.Request(
                     httpserver.url_for("/q") + f"?i={i}",
                     callback=self.parse,
                     filter_repeat=False,
@@ -103,10 +103,10 @@ def test_persistent_503_trips_the_breaker(
     monkeypatch.setattr(setting, "RETRY_AFTER_MAX", 0.0)
     httpserver.expect_request("/down").respond_with_data("boom", status=503)
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(2):
-                yield mw.Request(
+                yield ns.Request(
                     httpserver.url_for("/down") + f"?i={i}",
                     callback=self.parse,
                     filter_repeat=False,
@@ -132,10 +132,10 @@ def test_repeated_404_does_not_trip(
     monkeypatch.setattr(setting, "SPIDER_THREAD_COUNT", 1)
     httpserver.expect_request("/gone").respond_with_data("nope", status=404)
 
-    class S(mw.AirSpider):
+    class S(ns.AirSpider):
         def start_requests(self):  # type: ignore[no-untyped-def]
             for i in range(6):
-                yield mw.Request(
+                yield ns.Request(
                     httpserver.url_for("/gone") + f"?i={i}",
                     callback=self.parse,
                     filter_repeat=False,

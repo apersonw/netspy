@@ -148,7 +148,7 @@ N_TASKS = 20
 
 def _worker(base: str, mysql_url: str, redis_url: str, table: str, key: str) -> None:
     """一个 worker 进程：从共享队列取任务、抓取、回写状态。"""
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.core.batch_store import MysqlBatchStore
     from netspy.core.spiders.batch_spider import BatchSpider
@@ -168,7 +168,7 @@ def _worker(base: str, mysql_url: str, redis_url: str, table: str, key: str) -> 
 
     class Node(BatchSpider):
         def task_requests(self, task: dict[str, Any]) -> Any:
-            yield mw.Request(f"{base}/item/{task['id']}", callback=self.parse)
+            yield ns.Request(f"{base}/item/{task['id']}", callback=self.parse)
 
         def parse(self, request: Any, response: Any, task: Any = None) -> Any:
             self.update_task(task["id"], ok=True)
@@ -183,7 +183,7 @@ def _worker(base: str, mysql_url: str, redis_url: str, table: str, key: str) -> 
 
 def _master(base: str, mysql_url: str, redis_url: str, table: str, key: str) -> None:
     """master 进程：认领任务、往队列里灌。"""
-    import netspy as mw
+    import netspy as ns
     from netspy import setting
     from netspy.core.batch_store import MysqlBatchStore
     from netspy.core.spiders.batch_spider import BatchSpider
@@ -196,7 +196,7 @@ def _master(base: str, mysql_url: str, redis_url: str, table: str, key: str) -> 
 
     class Node(BatchSpider):
         def task_requests(self, task: dict[str, Any]) -> Any:
-            yield mw.Request(f"{base}/item/{task['id']}", callback=self.parse)
+            yield ns.Request(f"{base}/item/{task['id']}", callback=self.parse)
 
         def parse(self, request: Any, response: Any, task: Any = None) -> Any:
             return None
