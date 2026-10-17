@@ -1,6 +1,6 @@
 # Roadmap
 
-当前版本 **1.0.0**，变更明细见 [CHANGELOG](https://github.com/apersonw/netspy/blob/main/CHANGELOG.md)。
+当前版本变更明细见 [CHANGELOG](https://github.com/apersonw/netspy/blob/main/CHANGELOG.md)。
 
 ## 已具备的能力
 
