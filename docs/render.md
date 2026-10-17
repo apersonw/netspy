@@ -60,6 +60,43 @@ chrome` 或系统自带），UA 版本号、TLS/HTTP2 指纹会更贴近目标�
 Playwright 打包的那份 Chromium；启动时也默认带上 `--disable-blink-features=AutomationControlled`，
 关掉最直接的自动化标记（这条无条件生效，没有开关）。
 
+### 请求参数
+
+`Request` 上的 `cookies=` / `headers=` / `params=` 渲染时同样生效：
+
+- `params` 拼进导航的 URL；
+- `headers` 作为页面级额外请求头（页面发出的子资源 / XHR 也会带上）。`User-Agent` 例外——
+  它归 `WEBDRIVER["user_agent"]` 管，请求头里另塞一个会跟 `navigator.userAgent` 对不上；
+- 带 `cookies` 的请求（账号池挂上来的登录态就是这种）**单独开一个 context、用完即关**，
+  不会把这个账号的 cookie、以及站点回写的 cookie 带到同一渲染线程的下一个请求上。
+  没带 cookie 的请求照旧共用渲染线程的 context，跨请求保持会话。
+
+浏览器导航只会发不带请求体的 GET：`method="POST"` 或带 `data` / `json` 的渲染请求会直接报错，
+而不是悄悄变成 GET 发出去。需要提交表单的，在 `render_script` 里自己操作页面。
+
+!!! warning "1.3.3 之前渲染请求会忽略这些参数"
+    尤其是配合账号池用渲染时：登录 cookie 不发，页面回来是未登录态，`check_login` 判失败，
+    健康的账号会被当成失效拉黑——一个渲染请求就可能把整个账号池拉黑。
+
+### 代理
+
+渲染请求的出口和另外三个下载器**同一套规则**：请求显式指定的 `proxy=` >
+`WEBDRIVER["proxy"]`（固定代理）> 代理池（`PROXY_ENABLE=True`）。开着代理池却取不到代理时
+同样**不会直连**，等 `PROXY_WAIT_TIMEOUT` 后抛 `ProxyUnavailableError`；连不上代理会把它
+`report_bad`，页面超时之类说不清的失败只记一次可疑。
+
+!!! warning "1.3.3 之前渲染请求不走代理池"
+    旧版本的渲染下载器只认 `WEBDRIVER["proxy"]`，从不问代理池——`PROXY_ENABLE=True` 时
+    `render=True` 的请求会从源 IP 直连目标站，而且没有任何提示。开代理池又用渲染的，请升级。
+
+Chromium 的代理是 **context 级**的，所以每个出口有自己的 context（每个渲染线程最多缓存
+`SESSION_CACHE_SIZE` 个，换出时关闭）。这意味着**不同出口之间 cookie 不共享**——同一个 IP
+带着同一份 cookie 才是真实用户的样子，换了 IP 还带着上一个 IP 的登录态反而可疑。UA / 视口 /
+时区等画像在所有出口上保持一致。
+
+`user_data_dir` 模式只有启动时那一个 context，出口没法按请求换：要配合代理用，把固定代理写进
+`WEBDRIVER["proxy"]`。只开代理池不写固定代理的话，渲染会直接报错，而不是悄悄换回直连。
+
 ### engine="patchright"
 
 ```bash

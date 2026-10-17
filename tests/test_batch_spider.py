@@ -442,6 +442,46 @@ def test_mysql_store_reset_all_and_finish() -> None:
 
 
 # ====================================================================== master 锁的续期
+def test_sole_master_survives_a_check_interval_longer_than_the_lock_ttl(
+    fake_redis: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归测试：巡检间隔比锁 TTL 长时，唯一的 master 不该把自己判成「锁已易主」。
+
+    锁只在每轮巡检开头续一次期，两轮之间要睡满 `monitor_interval`。原来 TTL
+    写死 60 秒——`BATCH_MONITOR_INTERVAL` 一设到 60 以上（日更批次每隔几分钟
+    看一眼完全是正常配置），锁就在睡眠期间过期，下一次续期发现 key 没了，
+    抛「锁已易主」，master 直接退出。全程根本没有第二个 master。
+
+    等比缩小时间：TTL 1 秒、间隔 1.5 秒，与 TTL 60 秒、间隔 90 秒是同一机制。
+    """
+    from netspy.core import batch_monitor
+
+    monkeypatch.setattr(batch_monitor, "_LOCK_TTL", 1)
+    monitor = BatchMonitor(
+        store=MemoryBatchStore([{"id": i} for i in range(3)]),  # 没有 worker，批次永远跑不完
+        redis=fake_redis,
+        ns="netspy:LONGINTERVAL",
+        batch_interval=1.0,
+        monitor_interval=1.5,
+    )
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            monitor.run_once()
+            result["ok"] = True
+        except SpiderError as exc:
+            result["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(3.5)  # 跨过两次睡眠
+    monitor.stop()
+    t.join(timeout=5)
+    assert "error" not in result, f"唯一的 master 把自己杀了：{result.get('error')!r}"
+    assert result.get("ok")
+
+
 def test_renew_does_not_steal_back_an_expired_lock(fake_redis: Any) -> None:
     """续期必须校验「锁还是不是我的」。
 

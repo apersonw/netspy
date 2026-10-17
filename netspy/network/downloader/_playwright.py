@@ -15,13 +15,23 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import OrderedDict
+from collections.abc import Mapping
 from functools import lru_cache
+from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from netspy import setting
 from netspy.exceptions import ConfigError, RequestError
-from netspy.network.downloader._common import check_size
+from netspy.network.downloader._common import (
+    check_size,
+    pick_proxy,
+    report_bad_proxy,
+    report_good_proxy,
+    report_proxy_failure,
+)
 from netspy.network.downloader.base import Downloader
 from netspy.network.response import Response
 from netspy.network.user_agent import get_random_user_agent
@@ -87,10 +97,13 @@ def _import_sync_playwright(engine: str) -> Any:
 
 
 class _Job:
-    __slots__ = ("error", "event", "request", "response")
+    __slots__ = ("error", "event", "proxy", "request", "response")
 
-    def __init__(self, request: Request) -> None:
+    def __init__(self, request: Request, proxy: str | None = None) -> None:
         self.request = request
+        #: 调用方线程里用 `pick_proxy()` 定好的出口；None = 直连（只在没开代理池、
+        #: 或显式允许直连时才可能是 None）
+        self.proxy = proxy
         self.event = threading.Event()
         self.response: Response | None = None
         self.error: BaseException | None = None
@@ -119,6 +132,11 @@ class _RenderWorker(threading.Thread):
         self._pw: Any = None
         self._browser: Any = None
         self._context: Any = None
+        #: 默认 context 用的是哪个出口（launch 时就定死的 `WEBDRIVER["proxy"]`，或 None）
+        self._default_proxy: str | None = config.get("proxy") or None
+        #: 其它出口各一个 context。Chromium 的代理是 context 级的，一个 context 只能
+        #: 走一个出口，换代理就得换 context。有界 LRU，跟 HTTP 下载器的连接池缓存一个口径
+        self._proxy_contexts: OrderedDict[str, Any] = OrderedDict()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -135,7 +153,7 @@ class _RenderWorker(threading.Thread):
                     break
                 try:
                     self._ensure_browser()
-                    job.response = self._render(job.request)
+                    job.response = self._render(job.request, job.proxy)
                 except Exception as exc:
                     job.error = exc
                 finally:
@@ -201,20 +219,87 @@ class _RenderWorker(threading.Thread):
             self._browser = browser_type.launch(**launch_kwargs)
             self._context = self._browser.new_context(**ctx_kwargs)
 
-        if not cfg.get("load_images", False):
-            self._context.route("**/*", _maybe_block)
-        if cfg.get("stealth", True):
-            self._context.add_init_script(_stealth_script())
+        # 额外的代理 context 要和默认 context 是同一份画像（UA / 视口 / 时区……），
+        # 只换出口——否则换个代理，指纹也跟着变了
+        self._ctx_kwargs = ctx_kwargs
+        self._prepare_context(self._context)
         log.debug("渲染线程 {} 已启动 {}", self.name, cfg.get("browser", "chromium"))
 
-    def _render(self, request: Request) -> Response:
+    def _prepare_context(self, context: Any) -> None:
+        if not self._config.get("load_images", False):
+            context.route("**/*", _maybe_block)
+        if self._config.get("stealth", True):
+            context.add_init_script(_stealth_script())
+
+    def _context_for(self, proxy: str | None) -> Any:
+        """这个出口对应的 context。
+
+        **不能静默退回默认 context**：默认 context 要么直连、要么走 launch 时
+        定死的那个代理——拿它去渲染一个本该走别的代理的请求，等于把请求从
+        错误的出口（往往就是源 IP）打出去。拿不到对的 context 就抛错。
+        """
+        # None 走默认 context：配了固定代理时 pick_proxy() 永远会返回它，
+        # 走到这里的 None 只可能是「没开代理池、本来就直连」
+        if proxy is None or proxy == self._default_proxy:
+            return self._context
+        if self._browser is None:
+            # persistent profile：只有 launch 时那一个 context，出口改不了
+            raise RequestError(
+                f"持久化 profile（WEBDRIVER['user_data_dir']）模式下浏览器的出口在启动时"
+                f"就定死了（{self._default_proxy or '直连'}），没法按请求换成 {proxy}。"
+                "要配合代理用，把固定代理写进 WEBDRIVER['proxy']"
+            )
+        context = self._proxy_contexts.get(proxy)
+        if context is not None:
+            self._proxy_contexts.move_to_end(proxy)
+            return context
+        context = self._new_context(proxy)
+        self._proxy_contexts[proxy] = context
+        limit = max(setting.SESSION_CACHE_SIZE, 1)
+        while len(self._proxy_contexts) > limit:
+            _, old = self._proxy_contexts.popitem(last=False)
+            try:
+                old.close()
+            except Exception:
+                log.debug("关闭换出的代理 context 失败", exc_info=True)
+        return context
+
+    def _new_context(self, proxy: str | None) -> Any:
+        """跟默认 context 同一份画像的新 context。出口和默认 context 相同时不传
+        proxy——Chromium 的新 context 会沿用 launch 时的浏览器级代理。"""
+        kwargs = dict(self._ctx_kwargs)
+        if proxy is not None and proxy != self._default_proxy:
+            kwargs["proxy"] = {"server": proxy}
+        context = self._browser.new_context(**kwargs)
+        self._prepare_context(context)
+        return context
+
+    def _render(self, request: Request, proxy: str | None = None) -> Response:
         cfg = self._config
         timeout_ms = float(cfg["timeout"]) * 1000
-        page = self._context.new_page()
+        url, headers, cookies = _render_inputs(request)
+        if cookies and self._browser is not None:
+            # 带 cookie 的请求（账号池挂上来的登录态最典型）单独开一个 context，用完即关：
+            # 共享 context 是同一个渲染线程上所有请求共用的 cookie jar，往里塞 A 账号的
+            # cookie，下一个 B 账号的请求就带着 A 的登录态出去了；站点回写的 cookie 也一样
+            context, owned = self._new_context(proxy), True
+        else:
+            # persistent profile 只有一个 context（它本来就是「一个固定身份」）
+            context, owned = self._context_for(proxy), False
         try:
-            nav = page.goto(
-                request.url, timeout=timeout_ms, wait_until=cfg.get("wait_until", "load")
-            )
+            if cookies:
+                context.add_cookies(
+                    [{"name": k, "value": str(v), "url": url} for k, v in cookies.items()]
+                )
+            page = context.new_page()
+        except BaseException:
+            if owned:
+                context.close()
+            raise
+        try:
+            if headers:
+                page.set_extra_http_headers(headers)
+            nav = page.goto(url, timeout=timeout_ms, wait_until=cfg.get("wait_until", "load"))
             wait_for = request.wait_for or cfg.get("wait_for")
             if wait_for:
                 page.wait_for_selector(wait_for, timeout=timeout_ms)
@@ -235,24 +320,29 @@ class _RenderWorker(threading.Thread):
             # 注意此时浏览器进程早已把整页装下了 —— 这一刀挡的是「把巨大的字符串
             # 交给用户的 parse()」，挡不住浏览器那边的内存
             check_size(body, page.url)
-            cookies = {c["name"]: c["value"] for c in self._context.cookies()}
+            resp_cookies = {c["name"]: c["value"] for c in context.cookies()}
             status = nav.status if nav is not None else 200
-            headers = dict(nav.headers) if nav is not None else {}
-            headers.setdefault("content-type", "text/html; charset=utf-8")
+            resp_headers = dict(nav.headers) if nav is not None else {}
+            resp_headers.setdefault("content-type", "text/html; charset=utf-8")
             return Response(
                 url=page.url,
                 status_code=status,
                 content=body,
-                headers=headers,
-                cookies=cookies,
+                headers=resp_headers,
+                cookies=resp_cookies,
                 request=request,
                 encoding="utf-8",
             )
         finally:
             page.close()
+            if owned:
+                context.close()
 
     def _teardown(self) -> None:
+        extra = [(ctx, "close") for ctx in self._proxy_contexts.values()]
+        self._proxy_contexts.clear()
         for obj, method in (
+            *extra,
             (self._context, "close"),
             (self._browser, "close"),
             (self._pw, "stop"),
@@ -264,6 +354,68 @@ class _RenderWorker(threading.Thread):
             except Exception:
                 log.debug("渲染资源清理异常", exc_info=True)
         self._context = self._browser = self._pw = None
+
+
+#: 渲染没法照办的请求参数：浏览器导航只会发 GET，没有请求体
+_BODY_KEYS = ("data", "json", "content", "files")
+
+
+def _render_inputs(request: Request) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """把 `requests_kwargs` 翻成浏览器能用的 (url, 额外请求头, cookie)。
+
+    原来渲染这条路**整个忽略 requests_kwargs**：账号池挂上来的登录 cookie 不发，
+    页面回来是未登录态，`check_login` 判失败，健康的账号被当成失效拉黑 30 分钟——
+    实测一个 render 请求就把整个账号池拉黑了。`params` 不拼进 URL，渲染的是另一个页面；
+    POST 被静默当成 GET。照办不了的就明说，不能悄悄换一种请求发出去。
+    """
+    rk = request.requests_kwargs
+    body = [k for k in _BODY_KEYS if rk.get(k) is not None]
+    if request.method != "GET" or body:
+        got = "、".join([request.method, *body])
+        raise RequestError(
+            f"渲染只能发不带请求体的 GET（收到 {got}）：{request.url}。"
+            "需要 POST 的页面请去掉 render=True，或在 render_script 里自己提交表单"
+        )
+    url = request.url
+    params = rk.get("params")
+    if params:
+        items = params.items() if isinstance(params, Mapping) else params
+        parts = urlsplit(url)
+        query = parse_qsl(parts.query, keep_blank_values=True) + [
+            (str(k), str(v)) for k, v in items
+        ]
+        url = urlunsplit(parts._replace(query=urlencode(query)))
+    # User-Agent 归 WEBDRIVER["user_agent"] 管：请求头里另塞一个，跟 navigator.userAgent
+    # 对不上，比不伪装更容易被识别
+    headers = {
+        str(k): str(v)
+        for k, v in (rk.get("headers") or {}).items()
+        if str(k).lower() != "user-agent"
+    }
+    raw = rk.get("cookies") or {}
+    if isinstance(raw, CookieJar):
+        cookies: dict[str, Any] = {c.name: c.value for c in raw if c.value is not None}
+    else:
+        cookies = dict(raw)
+    return url, headers, cookies
+
+
+#: Chromium 网络错误里「确实是代理自己的错」的那几种：连不上代理、隧道建不起来
+_PROXY_FAULT_MARKERS = (
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_PROXY_AUTH",
+    "ERR_NO_SUPPORTED_PROXIES",
+)
+
+
+def _report_render_proxy_failure(proxy: str, exc: BaseException) -> None:
+    """渲染失败时按谁的错分流，跟 HTTP 下载器同一个口径：确定是代理坏了就拉黑，
+    说不清的（页面超时、目标站慢）只记一次可疑。"""
+    if any(marker in str(exc) for marker in _PROXY_FAULT_MARKERS):
+        report_bad_proxy(proxy)
+    else:
+        report_proxy_failure(proxy, exc)
 
 
 def _maybe_block(route: Any) -> None:
@@ -283,10 +435,22 @@ class _RenderPool:
         self._workers: list[_RenderWorker] = []
         self._lock = threading.Lock()
         self._started = False
+        #: 一旦关闭就永远是 True——见 `_ensure_started` 的说明
+        self._closed = False
 
     def _ensure_started(self) -> None:
+        """懒启动。**关闭过的池不会被重新点亮**：`PlaywrightDownloader.download()`
+        允许在 `close()` 进行中读到旧的池对象（同一类「读完之后线程被切走」的
+        并发窗口），那个调用最终会走到这里。`close()` 停 worker、join 它们
+        可能耗时数秒，期间这里会卡在同一把锁上；`close()` 结束后若只看
+        `self._started`（这时已经被置回 False），这里会误判成"还没启动过"，
+        重新拉起一整套 worker 线程——而 `PlaywrightDownloader._pool` 早就
+        指向别的（或空的）对象了，这批新起的浏览器进程从此没有任何代码路径
+        会再管它们，泄漏到进程退出为止。实测复现：`close()` 完成后被这样
+        重新启动，日志里"渲染池启动"打印了两遍。
+        """
         with self._lock:
-            if self._started:
+            if self._closed or self._started:
                 return
             size = max(1, int(self._config.get("pool_size", 1)))
             for i in range(size):
@@ -296,9 +460,9 @@ class _RenderPool:
             self._started = True
             log.info("渲染池启动，{} 个浏览器", size)
 
-    def submit(self, request: Request) -> Response:
+    def submit(self, request: Request, proxy: str | None = None) -> Response:
         self._ensure_started()
-        job = _Job(request)
+        job = _Job(request, proxy)
         self._jobs.put(job)
         # 兜底：worker 被杀、浏览器卡死、或者哪条路径漏了 set()，
         # 都不该让调用者永远等下去。上限取渲染超时 + 余量 ——
@@ -312,6 +476,9 @@ class _RenderPool:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             if not self._started:
                 return
             for worker in self._workers:
@@ -374,7 +541,23 @@ class PlaywrightDownloader(Downloader):
                 if pool is None:
                     pool = _RenderPool(self._config)
                     self._pool = pool
-        return pool.submit(request)
+        # 出口跟另外三个下载器走同一个判定：请求显式指定 > WEBDRIVER["proxy"] > 代理池。
+        # 原来渲染这条路**根本不问代理池**——`PROXY_ENABLE=True` 时普通请求都走代理，
+        # render=True 的请求却从源 IP 直连目标站，正是代理池要防的那件事，而且一声不吭。
+        # 在调用方线程里取：池空时 pick_proxy 会等 PROXY_WAIT_TIMEOUT，不能让渲染线程陪着等
+        rk = request.requests_kwargs
+        explicit = rk.get("proxy") or rk.get("proxies") or self._config.get("proxy") or None
+        proxy = pick_proxy(request, explicit)
+        from_pool = proxy is not None and explicit is None
+        try:
+            response = pool.submit(request, proxy)
+        except RequestError as exc:
+            if from_pool:
+                _report_render_proxy_failure(proxy, exc.__cause__ or exc)  # type: ignore[arg-type]
+            raise
+        if from_pool:
+            report_good_proxy(proxy)  # type: ignore[arg-type]
+        return response
 
     def close(self) -> None:
         # 置空和读取必须和 download() 共用同一把锁，理由同上

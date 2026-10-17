@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 import socket
 import threading
 import time
@@ -70,6 +71,13 @@ class BatchMonitor:
         self._pending_key = f"{ns}:batch_pending"
         self._done_key = f"{ns}:batch_done"
         self._lock_key = f"{ns}:batch_monitor_lock"
+        #: 锁的 TTL 必须盖过两次续期之间的间隔。续期只在每轮巡检开头做一次，
+        #: 中间要睡满 `monitor_interval`——原来 TTL 写死 60 秒，
+        #: `BATCH_MONITOR_INTERVAL` 一设到 60 以上（日更批次每几分钟看一眼是很
+        #: 正常的配置），锁就在睡眠期间过期，下一次续期发现 key 没了，误判成
+        #: 「锁已易主」，唯一的 master 自己把自己杀掉——全程根本没有第二个 master。
+        #: ×3 给单轮巡检本身的耗时（认领、推送几千个任务）也留出余量。
+        self._lock_ttl = max(_LOCK_TTL, math.ceil(monitor_interval * 3))
         self._node_id = f"{socket.gethostname()}-{time.time():.0f}"
         self._stop = threading.Event()
 
@@ -156,7 +164,7 @@ class BatchMonitor:
 
     # ---- Redis 锁：同一命名空间只允许一个 monitor ----
     def _hold_lock(self) -> _LockGuard:
-        if not self._redis.set(self._lock_key, self._node_id, nx=True, ex=_LOCK_TTL):
+        if not self._redis.set(self._lock_key, self._node_id, nx=True, ex=self._lock_ttl):
             raise SpiderError(f"已有 BatchSpider monitor 在运行（{self._lock_key}）")
         return _LockGuard(self._redis, self._lock_key, self._node_id)
 
@@ -172,7 +180,7 @@ class BatchMonitor:
         （释放路径本来就校验了持有者，只是那边也是非原子的 GET-then-DEL，一并收拾。）
         """
         if not self._redis.register_script(_RENEW_LUA)(
-            keys=[self._lock_key], args=[self._node_id, _LOCK_TTL]
+            keys=[self._lock_key], args=[self._node_id, self._lock_ttl]
         ):
             # 锁已经不是自己的了：另一个 master 接管了，本节点不该再认领任务
             raise SpiderError(f"BatchSpider monitor 锁已易主（{self._lock_key}），本节点退出")

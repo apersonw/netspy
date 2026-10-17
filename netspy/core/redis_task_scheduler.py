@@ -88,6 +88,9 @@ class RedisTaskScheduler(RedisScheduler):
 
     def _seed(self) -> None:
         log.info("TaskSpider：等待任务源（keep_alive={}）", self._keep_alive)
+        # 没有 start_requests 可种，但上一轮重试耗尽的请求照样要能回放
+        if self._replay_failed_requests():
+            self._request_buffer.flush()
 
     def _on_start(self) -> None:
         super()._on_start()

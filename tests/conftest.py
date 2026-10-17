@@ -12,7 +12,22 @@ from netspy.utils import log
 
 
 @pytest.fixture(autouse=True)
-def _reset_state() -> Iterator[None]:
+def _isolated_cwd(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """每个用例在自己的临时目录里跑。
+
+    `FAILED_REQUEST_PATH` / `FAILED_ITEM_PATH` / `RESPONSE_CACHE_PATH` / `CSV_OUTPUT_DIR`
+    默认都是相对 cwd 的，项目 `setting.py` 也按 cwd 找。原来用例直接在仓库根跑：
+    每跑一遍全量测试，仓库根的 `failed_requests.jsonl` 就多出约 2000 条指向早已关掉的
+    临时 localhost 端口的请求——攒到 8.6 万条之后，一次开了 `RETRY_FAILED_ON_START`
+    的运行就把它们全当成真失败请求回放了。用例要的话照样可以自己 chdir 到 tmp_path。
+    """
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_state(_isolated_cwd: None) -> Iterator[None]:
     """每个测试前后都把配置与日志恢复到默认，隔离用例间的环境 / 配置改动。
 
     `set_effective_concurrency(None)` 也在这里：那个全局是「调度器告知的真实线程数」，

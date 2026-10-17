@@ -33,7 +33,7 @@ def stub_browser(monkeypatch: pytest.MonkeyPatch) -> Any:
     """不起浏览器；渲染慢到足以让请求排上队。"""
     monkeypatch.setattr(pw._RenderWorker, "_ensure_browser", lambda self: None)
 
-    def _slow(self: Any, request: Request) -> Response:
+    def _slow(self: Any, request: Request, proxy: str | None = None) -> Response:
         time.sleep(0.5)
         return Response(
             url=request.url, status_code=200, content=b"<html>ok</html>", request=request
@@ -178,6 +178,72 @@ def test_downloader_close_does_not_race_with_in_flight_download() -> None:
 
     assert "error" not in result, f"download() 崩了：{result.get('error')!r}"
     assert result["response"].status_code == 200
+
+
+def test_close_does_not_resurrect_the_pool(
+    stub_browser: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归测试：`close()` 进行中卡在 `worker.join()` 里时，一个迟到的
+    `submit()`（模拟持有旧池引用、正在渲染的 worker）不该在锁放开后把
+    已经关闭的池重新点亮。
+
+    实测复现的真 bug：`_ensure_started()` 原来只看 `self._started`——
+    `close()` 的 `worker.join()` 可能耗时数秒，期间持有同一把锁；`close()`
+    结束后才把 `_started` 置回 `False`。一个卡在等锁的 `_ensure_started()`
+    调用，锁放开后看到 `_started == False`，会误判成"还没启动过"，重新拉起
+    一整套 worker 线程——而 `PlaywrightDownloader._pool` 早就不指向这个
+    对象了，新起的浏览器进程从此没有任何代码路径会再管它们，泄漏到进程
+    退出为止。实测复现：`close()` 完成后被这样重新启动，"渲染池启动"
+    这行日志打印了两遍。
+
+    用一个包一层暂停的 `join()` 强制两个线程的时序真正重叠。迟到请求走
+    的是等待超时兜底，所以把超时和余量都调小，测试不用真等 40 秒。
+    """
+    monkeypatch.setattr(pw, "_WAIT_MARGIN", 0.2)
+    pool = pw._RenderPool({"pool_size": 1, "timeout": 0.1, "headless": True})
+    pool._ensure_started()  # 先起好池，不经过 submit()（渲染桩要 sleep 0.5s，会撞上短超时）
+
+    close_in_progress = threading.Event()
+    release_join = threading.Event()
+    original_join = pw._RenderWorker.join
+
+    def slow_join(self: Any, timeout: float | None = None) -> None:
+        close_in_progress.set()
+        release_join.wait(timeout=5)
+        original_join(self, timeout=timeout)
+
+    pw._RenderWorker.join = slow_join  # type: ignore[method-assign]
+
+    closer = threading.Thread(target=pool.close)
+    late_result: dict[str, Any] = {}
+
+    def late_submitter() -> None:
+        try:
+            late_result["response"] = pool.submit(Request("http://example.com/late"))
+        except RequestError as exc:
+            late_result["error"] = exc
+
+    try:
+        closer.start()
+        assert close_in_progress.wait(timeout=2), "没能让 close() 卡在 join() 里，测试前提不成立"
+
+        submitter = threading.Thread(target=late_submitter)
+        submitter.start()
+        time.sleep(0.3)  # 让 submitter 卡在等 pool._lock 上（close() 正持有它）
+
+        release_join.set()
+        closer.join(timeout=5)
+        submitter.join(timeout=5)
+    finally:
+        pw._RenderWorker.join = original_join  # type: ignore[method-assign]
+
+    assert pool._started is False, "close() 之后池被重新点亮了"
+    assert not pool._workers, (
+        f"close() 之后又冒出了 {len(pool._workers)} 个新 worker——泄漏的浏览器进程"
+    )
+    # 迟到的请求该干净地失败（走既有的等待超时兜底），而不是被一个复活的、
+    # 从此没人管理的池悄悄接住
+    assert "error" in late_result, f"迟到的请求不该成功：{late_result}"
 
 
 def test_wait_has_an_upper_bound(monkeypatch: pytest.MonkeyPatch) -> None:

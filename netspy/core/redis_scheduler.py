@@ -20,6 +20,7 @@ from netspy.core.task_queue import RedisTaskQueue
 from netspy.db.redisdb import acquire_once, get_redis
 from netspy.dedup import get_item_filter, get_request_filter
 from netspy.exceptions import ConfigError
+from netspy.network.request import Request
 from netspy.utils import stats as sk
 from netspy.utils import tools
 from netspy.utils.log import get_logger
@@ -172,6 +173,7 @@ class RedisScheduler(BaseScheduler):
             f"{self._ns}:z_inflight",
             f"{self._ns}:lock:seed",
             f"{self._ns}:{_FAILED_KEY}",
+            self._replay_staging_key(),
             f"{self._job_ns}:runs",
         ]
         if self._dedup_scope == "run":
@@ -235,8 +237,34 @@ class RedisScheduler(BaseScheduler):
                 setting.DEDUP_FILTER,
             )
 
+    def _warn_on_unsafe_timing(self) -> None:
+        """心跳 / 租约几个间隔之间有硬约束，配反了不报错、只会悄悄出事。
+
+        - 心跳间隔 ≥ `HEARTBEAT_STALE`：两次心跳之间，活着的节点在别人眼里就是「死了」，
+          其它节点据此判定「所有节点都空闲」提前收工；
+        - 心跳间隔 ≥ `SPIDER_TASK_LEASE`：租约是挂在心跳上续的，续上之前就过期了，
+          别的节点会把还在处理的任务回收走重抓一遍。
+        """
+        interval = setting.HEARTBEAT_INTERVAL
+        if interval >= setting.HEARTBEAT_STALE:
+            log.warning(
+                "HEARTBEAT_INTERVAL={}s 不小于 HEARTBEAT_STALE={}s：两次心跳之间活节点会被当成"
+                "已死，其它节点可能提前收工。把 HEARTBEAT_STALE 设成心跳间隔的 3 倍以上",
+                interval,
+                setting.HEARTBEAT_STALE,
+            )
+        lease = setting.SPIDER_TASK_LEASE
+        if lease > 0 and interval >= lease:
+            log.warning(
+                "HEARTBEAT_INTERVAL={}s 不小于 SPIDER_TASK_LEASE={}s：租约在心跳续上之前就过期，"
+                "处理中的任务会被别的节点回收重抓。把租约设成心跳间隔的几倍以上",
+                interval,
+                lease,
+            )
+
     def _on_start(self) -> None:
         self._warn_if_dedup_is_process_local()
+        self._warn_on_unsafe_timing()
         self._register_run()
         self._touch_run_keys()
         self._heartbeat = _Heartbeat(
@@ -272,6 +300,13 @@ class RedisScheduler(BaseScheduler):
             return 0
 
     def _seed(self) -> None:
+        self._seed_or_skip()
+        # 放在种子之后：先把失败请求灌进去的话队列就非空了，start_requests 会被当成
+        # 「已经种过」跳过。种子那条路里 _seed_requests() 已经回放过的，这里取到的是空的
+        if self._replay_failed_requests():
+            self._request_buffer.flush()
+
+    def _seed_or_skip(self) -> None:
         seed_key = f"{self._ns}:lock:seed"
         if not acquire_once(self._redis, seed_key, ttl=setting.SPIDER_SEED_LOCK_TTL):
             self._explain_skipped_seed(seed_key)
@@ -280,6 +315,49 @@ class RedisScheduler(BaseScheduler):
             log.info("队列非空（{} 条），跳过种子注入，继续消费", self._task_queue.qsize())
             return
         log.info("种子请求 {} 条", self._seed_requests())
+
+    def _replay_staging_key(self) -> str:
+        return f"{self._ns}:{_FAILED_KEY}:replaying:{self._node_id}"
+
+    def _replay_failed_requests(self) -> int:
+        """`RETRY_FAILED_ON_START` 的分布式版：把 Redis 失败列表灌回队列。
+
+        原来分布式下重试耗尽的请求 RPUSH 进 `<ns>:failed_requests` 之后就**再也没有
+        代码读它**——`RETRY_FAILED_ON_START` 只回放本地文件，而分布式节点根本不往
+        文件里写。文档让用户「要把数据真正抓回来，开 RETRY_FAILED_ON_START」，对
+        `Spider` / `TaskSpider` 这句话是空的：实测站点恢复后重跑，0 个请求发出，
+        失败列表原封不动。
+
+        跟文件版同一个思路：**先改名再消费**。`RENAME` 是原子的，多个节点同时启动
+        也只有一个能拿到；灌进队列、flush 成功之后才删暂存 key——中途崩了暂存 key
+        还在，不会因为「已经读过了」就丢掉。本机落盘的那份（推回 Redis 失败时的兜底）
+        照旧由父类回放。
+        """
+        if not setting.RETRY_FAILED_ON_START:
+            return 0
+        count = super()._replay_failed_requests()
+        staging = self._replay_staging_key()
+        try:
+            self._redis.rename(f"{self._ns}:{_FAILED_KEY}", staging)
+        except Exception:
+            # 列表不存在（没有失败请求），或别的节点先一步改了名
+            return count
+        replayed = 0
+        for raw in self._redis.lrange(staging, 0, -1):
+            try:
+                request = Request.from_dict(tools.loads_json(raw))
+            except Exception:
+                log.exception("这条失败请求解析不了，跳过：{}", str(raw)[:120])
+                continue
+            # 指纹早就在去重里了——不清掉的话灌回去会被静默挡下
+            request.filter_repeat = False
+            self._request_buffer.put(request)
+            replayed += 1
+        self._request_buffer.flush()
+        self._redis.delete(staging)
+        if replayed:
+            log.info("从 Redis 失败列表重新灌入 {} 条请求", replayed)
+        return count + replayed
 
     def _explain_skipped_seed(self, seed_key: str) -> None:
         """拿不到种子锁 —— 是别的节点正在种，还是上一轮留下的？**要分得清。**

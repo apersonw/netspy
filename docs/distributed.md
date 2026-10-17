@@ -45,7 +45,7 @@ python main.py    # 机器 B —— 自动加入，一起消费队列
 | **种子一次性** | `start_requests` 靠 `SET NX EX` 锁，只有抢到锁的节点执行；其他节点直接消费队列 |
 | **断点续爬** | 队列在 Redis，进程崩溃重启后队列还在，继续跑；崩溃节点采集器里没跑完的会在退出时推回队列 |
 | **多节点结束检测** | 每个节点每 `HEARTBEAT_INTERVAL` 秒写一次心跳（含本节点在途数）。只有「队列空 + 所有活跃节点在途数都为 0」才判定结束 |
-| **失败请求** | 重试耗尽的请求 RPUSH 到 `<prefix>:<redis_key>:failed_requests` |
+| **失败请求** | 重试耗尽的请求 RPUSH 到 `<prefix>:<redis_key>:failed_requests`；开 `RETRY_FAILED_ON_START` 后，下次启动时把它灌回队列（多节点同时启动只有一个节点回放） |
 
 `redis_key` 默认是爬虫类名，决定 Redis 命名空间。不同爬虫用不同 `redis_key`，
 同一个爬虫的多个进程用同一个。

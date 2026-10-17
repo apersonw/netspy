@@ -36,9 +36,13 @@ PROXY_EXTRACT_API = "http://proxy-provider.com/get?count=10"   # 返回每行一
 PROXY_MAX_USE_TIMES = 100      # 单个代理用满这么多次后轮换
 PROXY_WAIT_TIMEOUT = 30.0      # 池空时最多等多久，超时抛 ProxyUnavailableError
 PROXY_ALLOW_DIRECT = False     # True 才允许「没代理就直连」
+PROXY_BAN_SECONDS = 60.0       # 代理确定坏了之后冷却多久；连续失败按 2 倍退避，0 = 永久拉黑
+PROXY_BAN_MAX_SECONDS = 900.0  # 退避封顶
 ```
 
-`HttpxDownloader` 会在请求没有显式代理时从池里取一个；下载报错时自动 `report_bad` 丢弃该代理。
+所有下载器（httpx / async / curl，以及 `render=True` 的浏览器渲染）都会在请求没有显式代理时
+从池里取一个；确定是代理的错时 `report_bad` 让它冷却。渲染请求按出口分 context，
+见[浏览器渲染 · 代理](render.md#代理)。
 
 !!! warning "拿不到代理时**不会**直连"
     代理用满 `PROXY_MAX_USE_TIMES`、被 `report_bad` 丢弃、或取号接口断供，

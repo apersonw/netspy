@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import threading
+import time
 from collections.abc import Iterator
+from typing import Any
 
 import httpx
 import pytest
@@ -154,6 +157,60 @@ def test_close_is_idempotent() -> None:
     assert not any(
         t.name.startswith("async-downloader") and t.is_alive() for t in threading.enumerate()
     )
+
+
+def test_close_does_not_hang_a_worker_stuck_on_an_in_flight_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归测试：`close()` 时一个还没跑完的下载协程，不该让调用线程永久卡死。
+
+    `_Shard.submit()` 是 `run_coroutine_threadsafe(coro, loop).result()`，
+    不带超时。`close()` 原来只是 `loop.call_soon_threadsafe(loop.stop)`——
+    这只让 `run_forever()` 在当前这轮跑完后返回，**不会主动结束还挂起的
+    协程**。调度器停工作线程用的是**有超时的** join，一个慢请求的 worker
+    完全可能还卡在 `shard.submit(...).result()` 里；loop 一停，那个协程
+    从此再也没有机会被推进，它的 `Future` 永远停在 pending，调用方的
+    `.result()` 就跟着永久卡死——**不是超时失败，是真正无限期地挂起**，
+    这比其它「优雅停止失效」的坑更严重：连一个异常都不会有。
+
+    用一个卡在 `run_in_executor` 上、只能被外部信号唤醒的协程模拟"一个还
+    没跑完的慢请求"，然后并发调用 `close()`，断言调用线程能在有限时间内
+    收到结果（无论是异常还是别的），而不是永远醒不过来。
+    """
+    dl = AsyncHttpxDownloader(concurrency=4)
+    never_release = threading.Event()
+    started = threading.Event()
+
+    async def hang_forever(self: AsyncHttpxDownloader, request: Request, shard: Any) -> None:
+        started.set()
+        await asyncio.get_event_loop().run_in_executor(None, never_release.wait)
+
+    monkeypatch.setattr(AsyncHttpxDownloader, "_download", hang_forever)
+
+    result: dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            result["response"] = dl.download(Request("https://example.com/"))
+        except Exception as exc:
+            result["error"] = exc
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        assert started.wait(timeout=2), "下载协程没能真正开始，测试前提不成立"
+        time.sleep(0.1)
+
+        closer = threading.Thread(target=dl.close, daemon=True)
+        closer.start()
+        closer.join(timeout=10)
+        assert not closer.is_alive(), "close() 本身不该被一个挂起的协程拖住"
+
+        t.join(timeout=5)
+        assert not t.is_alive(), "worker 线程永久卡住了——这正是要修的 bug"
+        assert "error" in result, f"应该收到一个可捕获的异常，而不是别的：{result}"
+    finally:
+        never_release.set()
 
 
 @respx.mock

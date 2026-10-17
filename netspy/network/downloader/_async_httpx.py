@@ -259,6 +259,10 @@ class AsyncHttpxDownloader(Downloader):
             shard.submit(AsyncHttpxDownloader._aclose(shard))
         except Exception:
             log.debug("async 下载器关闭异常", exc_info=True)
+        try:
+            shard.submit(AsyncHttpxDownloader._cancel_pending(shard))
+        except Exception:
+            log.debug("取消 shard 上挂起的协程失败", exc_info=True)
         shard.loop.call_soon_threadsafe(shard.loop.stop)
         shard.thread.join(timeout=_CLOSE_TIMEOUT)
         if not shard.loop.is_closed():
@@ -272,3 +276,26 @@ class AsyncHttpxDownloader(Downloader):
         if shard.client is not None:
             await shard.client.aclose()
             shard.client = None
+
+    @staticmethod
+    async def _cancel_pending(shard: _Shard) -> None:
+        """取消这片 loop 上所有还没跑完的协程，并等它们真的收尾。
+
+        调度器停工作线程用的是**有超时的** join，一个慢请求的 worker 完全
+        可能还卡在 `shard.submit(coro).result()` 里（`download()` 走的就是
+        这条路）。`loop.stop()` 只是让 `run_forever()` 在这一轮跑完后返回，
+        **不会主动结束还在挂起的协程**——那个协程从此再也没有机会被推进，
+        它对应的 `concurrent.futures.Future` 永远停在 pending，调用方的
+        `.result()` 会跟着永久卡死，直到进程退出都不会醒。
+
+        `asyncio.gather(..., return_exceptions=True)` 等到取消真正生效
+        （协程收到 `CancelledError` 并退出）之后再返回——这一步执行完，
+        调用方那边被卡住的 `.result()` 就已经能拿到结果（`CancelledError`），
+        不用再赌 `loop.stop()` 和取消谁先被处理。
+        """
+        tasks = [t for t in asyncio.all_tasks(shard.loop) if t is not asyncio.current_task()]
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

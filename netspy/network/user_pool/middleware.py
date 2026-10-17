@@ -20,6 +20,33 @@ log = get_logger("user_pool")
 
 CheckLogin = Callable[["Response"], bool]
 
+#: 请求**自己**带的 cookie（挂账号之前的那份），存在 `request.custom` 里。
+#:
+#: 挂账号是直接改 `requests_kwargs["cookies"]` 的，而重试时重新入队的是**同一个**
+#: 请求对象——原来下一次挂号是在「上一个号的 cookie」上再盖一层，上一个号有、
+#: 这个号没有的 cookie 就留了下来。实测 alice 失败、换 bob 重试，bob 的请求带着
+#: `sid=BOB; device=ALICE-PHONE` 出去：一个请求顶着两个号的身份，正是站点用来
+#: 关联账号、一起封掉的那种信号。
+#:
+#: 放 `custom` 而不是普通属性：分布式下重试的请求会序列化进 Redis、被别的节点领走，
+#: 只有 `to_dict()` 带得走的东西才不会在换节点时丢掉。
+_BASE_COOKIES = "_user_pool_base_cookies"
+
+
+def _base_cookies(request: Request) -> dict[str, str]:
+    base = request.custom.get(_BASE_COOKIES)
+    if base is None:
+        base = dict(request.requests_kwargs.get("cookies") or {})
+        request.custom[_BASE_COOKIES] = base
+    return dict(base)
+
+
+def _set_cookies(request: Request, cookies: dict[str, str]) -> None:
+    if cookies:
+        request.requests_kwargs["cookies"] = cookies
+    else:
+        request.requests_kwargs.pop("cookies", None)
+
 
 class UserPoolMiddleware(DownloaderMiddleware):
     def __init__(self, pool: UserPool, *, check_login: CheckLogin | None = None) -> None:
@@ -27,6 +54,10 @@ class UserPoolMiddleware(DownloaderMiddleware):
         self._check = check_login
 
     def process_request(self, request: Request) -> Request | None:
+        base = _base_cookies(request)
+        # 上一次尝试挂的号不算数了：不清掉的话，这次匿名发出去时 process_response
+        # 还会拿着上一个号去 report_ok / report_bad
+        request.__dict__.pop("_user", None)
         user = self._wait_for_user()
         if user is None:
             if not setting.USER_POOL_ALLOW_ANONYMOUS:
@@ -40,9 +71,9 @@ class UserPoolMiddleware(DownloaderMiddleware):
                     "把 USER_POOL_ALLOW_ANONYMOUS 打开"
                 )
             log.warning("账号池没有可用账号，按配置匿名发出：{}", request.url)
+            _set_cookies(request, base)  # 匿名就真匿名，别带着上一个号的 cookie
             return None
-        existing = request.requests_kwargs.get("cookies") or {}
-        request.requests_kwargs["cookies"] = {**existing, **user.cookies}
+        _set_cookies(request, {**base, **user.cookies})
         request.__dict__["_user"] = user
         return request
 
@@ -58,7 +89,8 @@ class UserPoolMiddleware(DownloaderMiddleware):
             else:
                 log.warning("匿名请求拿到的不是登录后的内容，重试：{}", request.url)
             retry = request.copy()
-            retry.requests_kwargs.pop("cookies", None)
+            # 去掉的只是失效账号的 cookie，请求自己带的那些要留着
+            _set_cookies(retry, _base_cookies(retry))
             retry.filter_repeat = False
             return retry
         if user is not None:

@@ -25,6 +25,10 @@ NETSPY_SPIDER_THREAD_COUNT=8 NETSPY_LOG_LEVEL=DEBUG python main.py
 | `COLLECTOR_TASK_COUNT` | `100` | collector 单次从队列取多少任务 |
 | `DONE_CHECK_TIMES` / `DONE_CHECK_INTERVAL` | `3` / `0.5` | 结束检测的复查次数与间隔 |
 | `DUMP_UNFINISHED_ON_EXIT` | `True` | 中断时 dump 未完成请求 |
+| `FAILED_REQUEST_PATH` | `"failed_requests.jsonl"` | 未完成 / 重试耗尽的请求落盘位置（相对 cwd）。分布式下重试耗尽的进 Redis `<ns>:failed_requests` |
+| `RETRY_FAILED_ON_START` | `False` | 启动时把失败请求重新灌回队列，走完整的下载 → 回调 → 落库：单机读 `FAILED_REQUEST_PATH`，分布式另外读 Redis 失败列表（多节点同时启动只有一个节点回放）。`netspy retry --requests` 只是探活，这个才会把数据抓回来 |
+| `REQUEST_BUFFER_MAX_CACHED` | `1000` | 请求缓冲攒到这么多立刻推进队列 |
+| `BUFFER_FLUSH_INTERVAL` | `0.1` | 请求 / 数据缓冲的定时 flush 间隔（秒） |
 | `RUN_SUMMARY_ENABLE` | `True` | 结束时在 stdout 打一行机器可读摘要 `NETSPY_RUN_SUMMARY {...}`，供编排层读容器日志区分「跑了」和「抓了」，见[运行摘要](observability.md#运行摘要机器可读) |
 
 ## 请求
@@ -73,7 +77,9 @@ NETSPY_SPIDER_THREAD_COUNT=8 NETSPY_LOG_LEVEL=DEBUG python main.py
 | `ITEM_DEFAULT_TABLE` | `"items"` | 裸 dict 落库的表名 |
 | `ITEM_FILTER_ENABLE` | `True` | Item 级去重开关 |
 | `CSV_OUTPUT_DIR` | `"."` | CsvPipeline 输出目录 |
+| `FAILED_ITEM_PATH` | `"failed_items.jsonl"` | 写库失败的数据落盘位置（相对 cwd），`netspy retry --items` 回放 |
 | `DEDUP_FILTER` | `"memory"` | `memory`（布隆）\| `lite`（精确）\| `redis` \| `redis-set` |
+| `DEDUP_TO_MD5` | `True` | 直接用 `Dedup` 传原始值时先 md5 再存（请求 / Item 指纹本身已是 md5，不受影响） |
 | `DEDUP_ERROR_RATE` | `1e-6` | 布隆单层误判率（分层后总上界为其 2 倍） |
 | `SPIDER_TASK_LEASE` | `600.0` | 任务租约（秒）。节点被硬杀时靠它回收，代价是「至少一次」语义；`0` = 关闭。见[节点被硬杀之后](distributed.md#节点被硬杀之后) |
 | `SPIDER_STARTUP_GRACE` | `10.0` | 启动宽限（秒）：没拿到过任务的节点在此期间不判定结束。防止多节点同启时 N-1 个立刻退出，见[多节点同时启动](distributed.md#多节点同时启动) |
@@ -128,6 +134,8 @@ NETSPY_SPIDER_THREAD_COUNT=8 NETSPY_LOG_LEVEL=DEBUG python main.py
 | `LOG_LEVEL` | `"INFO"` |
 | `LOG_FILE` | `None`（只输出到 stderr） |
 | `LOG_ROTATION` / `LOG_RETENTION` | `"50 MB"` / `"10 days"` |
+| `LOG_COLOR` | `True`（stderr 着色；写进容器日志 / 文件给机器读时可以关掉） |
+| `PROJECT_NAME` | `"netspy"`（没绑定名字的日志行显示成这个） |
 
 写爬虫 / 管道 / 中间件 / 账号池时直接用 `self.logger`，不用自己
 `from netspy.utils.log import get_logger` 再手动 bind 一个名字：
