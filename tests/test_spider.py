@@ -152,6 +152,12 @@ def test_heartbeat_registered_and_cleaned(httpserver: HTTPServer, fake_redis: An
 
     class S(Crawl):
         def parse_page(self, request: Request, response: Any) -> Iterator[Any]:
+            # 等一下再看，别比谁快：工作线程先于心跳线程启动（心跳在 _on_start 里起），
+            # 只有一页的时候，worker 可能在第一次心跳写进去之前就解析完了。整个文件连着跑、
+            # 机器热起来之后这场比赛就会输，用例随机红。要验的是「跑着的时候登记了心跳」
+            deadline = time.monotonic() + 2
+            while fake_redis.hlen(hkey) == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
             seen["fields"] = fake_redis.hlen(hkey)
             yield from Crawl.parse_page(self, request, response)
 

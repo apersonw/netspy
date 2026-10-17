@@ -1,15 +1,25 @@
 name: Release
 
-# 两条路：
-#   1. 打 tag v0.4.0  → 正式 PyPI + GitHub Release（tag 必须与 __about__.py 一致）
-#   2. 手动触发        → 默认发 TestPyPI，用来演练整条 OIDC 链路，不用改版本号
+# 三条路：
+#   1. 打 tag v0.4.0          → 正式 PyPI + GitHub Release（tag 必须与 __about__.py 一致）
+#   2. 手动触发                → 默认发 TestPyPI，用来演练整条 OIDC 链路，不用改版本号
+#   3. 手动触发 + 勾「自动升补丁版本」→ 最后一位 +1、补 CHANGELOG、提交并打 tag，然后走 1 的正式发布
+#
+# 3 必须写在这个文件里，不能另起一个工作流：PyPI 的 Trusted Publishing 认的是
+# 「release.yml + pypi 这个 environment」，换个文件发就过不了 OIDC 校验；而且用
+# GITHUB_TOKEN 推上去的 tag 不会再触发任何工作流（GitHub 防递归），另起的工作流
+# 推完 tag 也等不来这里的发布。反过来这也保证了第 3 条路推 tag 不会让第 1 条路再发一遍。
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
+      bump_patch:
+        description: 自动升补丁版本（1.3.2 → 1.3.3）并发正式 PyPI。勾上时忽略下面的「发到哪个索引」
+        type: boolean
+        default: false
       target:
-        description: 发到哪个索引
+        description: 发到哪个索引（不勾自动升版本时生效）
         type: choice
         options: [testpypi, pypi]
         default: testpypi
@@ -17,20 +27,83 @@ on:
 permissions:
   contents: read
 
+# 两次发版同时跑会算出同一个版本号，排队一个个来
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  bump:
+    if: github.event_name == 'workflow_dispatch' && inputs.bump_patch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 推版本提交和 tag
+      actions: read # 查 CI 结果
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: 只从 main 发版
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::自动升版本只能从 main 触发（当前 ${{ github.ref }}）"
+          exit 1
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # 生成 CHANGELOG 要读上一个 tag 以来的提交
+
+      - name: 这个提交的 CI 必须是绿的
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          result=$(gh run list --workflow ci.yml --commit "$sha" --event push --limit 1 \
+                     --json status,conclusion --jq '.[0] // empty | "\(.status)/\(.conclusion)"')
+          echo "CI @ ${sha:0:7}: ${result:-没跑过}"
+          if [ "$result" != "completed/success" ]; then
+            echo "::error::${sha:0:7} 的 CI 不是绿的（${result:-没跑过}），不发版。等 CI 跑完或修好再触发"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: 升版本、提交、打 tag
+        id: release
+        run: |
+          # 有手写的 [Unreleased] / [新版本] 段落就用它，没有才拿提交标题生成，见脚本说明
+          version=$(python scripts/bump_patch.py)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "release: $version"
+          git tag -a "v$version" -m "v$version"
+          # --atomic：提交和 tag 要么一起上去要么都不上。触发之后 main 又被推过的话这里会
+          # 被拒（非快进），宁可失败重来，也不在别人的提交上面盖一个没测过的版本
+          git push --atomic origin HEAD:main "v$version"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: bump
+    # bump 被跳过（tag 触发 / 普通手动触发）照常跑；bump 失败就停
+    if: ${{ !cancelled() && needs.bump.result != 'failure' }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
       target: ${{ steps.meta.outputs.target }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # 自动升版本时要构建刚推上去的 tag，不是触发那一刻的 main
+          ref: ${{ needs.bump.outputs.tag || github.ref }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: 确定版本与目标索引
         id: meta
+        env:
+          BUMP_TAG: ${{ needs.bump.outputs.tag }}
         run: |
           # 必须锚在 __version__ 上：__about__.py 的文档字符串在前面，宽松的 "(.+)"
           # 会先匹配到那段三引号说明，静默产出垃圾版本号
@@ -42,10 +115,11 @@ jobs:
             exit 1
           fi
 
-          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            # tag 触发：包版本以 __about__.py 为准，tag 必须对得上，否则发出去的
-            # 产物版本和 tag 名不一致，事后无从追溯
-            tag="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] || [ -n "$BUMP_TAG" ]; then
+            # tag 触发 / 自动升版本：包版本以 __about__.py 为准，tag 必须对得上，否则
+            # 发出去的产物版本和 tag 名不一致，事后无从追溯
+            tag_ref="${BUMP_TAG:-$GITHUB_REF_NAME}"
+            tag="${tag_ref#v}"
             echo "tag=$tag  __about__=$pkg"
             if [ "$tag" != "$pkg" ]; then
               echo "::error::tag ($tag) 与 __about__.py ($pkg) 不一致，拒绝发布"
@@ -89,7 +163,9 @@ jobs:
   # 演练用：手动触发或 rc/a/b 预发布 → TestPyPI，验证整条 OIDC 链路
   testpypi:
     needs: build
-    if: needs.build.outputs.target == 'testpypi'
+    # 显式写 needs.build.result：build 是在上游 bump 被跳过时靠 !cancelled() 跑起来的，
+    # 下游不写的话默认的 success() 会把那次跳过也算进来，整条发布被连带跳过
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build.outputs.target == 'testpypi' }}
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -104,7 +180,7 @@ jobs:
   # 正式版 → PyPI
   pypi:
     needs: build
-    if: needs.build.outputs.target == 'pypi'
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build.outputs.target == 'pypi' }}
     runs-on: ubuntu-latest
     environment: pypi # 在仓库 Settings 里给这个 environment 加人工审批
     permissions:
@@ -114,15 +190,18 @@ jobs:
         with: { name: dist, path: dist }
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  # 只有 tag 触发的正式发布才建 GitHub Release（手动触发没有 tag 可挂）
+  # 有 tag 的正式发布才建 GitHub Release：tag 触发，或自动升版本（它自己打了 tag）
   github-release:
-    needs: [build, pypi]
-    if: needs.build.outputs.target == 'pypi' && github.event_name == 'push'
+    needs: [bump, build, pypi]
+    if: ${{ !cancelled() && needs.pypi.result == 'success' && (github.event_name == 'push' || needs.bump.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          # 发布说明要从 tag 那一版的 CHANGELOG 里抽——触发时的 main 还没有这一段
+          ref: v${{ needs.build.outputs.version }}
       - uses: actions/download-artifact@v8
         with: { name: dist, path: dist }
 
@@ -138,5 +217,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # 手动触发时 github.ref 是 main，不显式给 tag 的话 Release 会挂错地方
+          tag_name: v${{ needs.build.outputs.version }}
           body_path: notes.md
           files: dist/*
