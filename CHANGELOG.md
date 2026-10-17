@@ -3,6 +3,13 @@
 本文件格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.3] - 2026-10-17
+
+### 变更
+
+- feat(release): 增加自动升补丁版本的发布工作流
+- fix(user-pool): 修复Redis缓存Cookie损坏时导致的程序崩溃问题
+
 ## [1.3.2] - 2026-09-24
 
 ### 修复
